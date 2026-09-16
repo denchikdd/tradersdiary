@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { encrypt,digest,passwordHash,passwordMatches,cents,units,decimal } from './security.mjs';
 import { enqueue } from './database.mjs';
-import { catalog,createAdapter } from './exchanges.mjs';
+import { catalog,createAdapter,normalizedCapital } from './exchanges.mjs';
 
 class ApiError extends Error { constructor(status,message){super(message);this.status=status;} }
 export function createApi(db,key,{origin,secure,setupToken,adapterFactory=createAdapter}) {
@@ -105,9 +105,13 @@ export function createApi(db,key,{origin,secure,setupToken,adapterFactory=create
         if(!Number.isFinite(from)||!Number.isFinite(to)||to<from||to-from>370*86400000)throw new ApiError(400,'Некорректный период.');
         const offset=Math.max(0,Math.min(10000000,Number(url.searchParams.get('offset'))||0));
         const rows=db.prepare(`SELECT e.external_id,e.time,e.market,e.symbol,e.currency,e.raw,c.exchange,c.label FROM events e JOIN connections c ON c.id=e.connection_id WHERE e.kind='fill' AND e.time>=? AND e.time<? ORDER BY e.time DESC,e.external_id LIMIT 201 OFFSET ?`).all(from,to+86400000,offset);
-        return send(res,200,{hasMore:rows.length>200,rows:rows.slice(0,200).map(e=>{const v=JSON.parse(e.raw);return {id:e.external_id,time:e.time,exchange:e.exchange,account:e.label,symbol:e.symbol,market:e.market,side:v.side||(v.isBuyer?'Buy':'Sell'),quantity:v.execQty||v.qty||v.fillSz||v.sz||'',price:v.execPrice||v.price||v.fillPx||v.px||'',fee:v.execFee||v.commission||v.fee||'',currency:e.currency};})});
+        return send(res,200,{hasMore:rows.length>200,rows:rows.slice(0,200).map(e=>{const v=JSON.parse(e.raw),rawFee=v.execFee||v.commission||v.fee||'0',fee=e.exchange==='OKX'?decimal(-units(rawFee)):rawFee;return {id:e.external_id,time:e.time,exchange:e.exchange,account:e.label,symbol:e.symbol,market:e.market,side:v.side||(v.isBuyer?'Buy':'Sell'),quantity:v.execQty||v.qty||v.fillSz||v.sz||'',price:v.execPrice||v.price||v.fillPx||v.px||'',fee,currency:e.currency};})});
       }
-      if(method==='GET'&&path==='/balances')return send(res,200,{snapshots:db.prepare('SELECT c.exchange,c.label,s.time,s.data FROM snapshots s JOIN connections c ON c.id=s.connection_id').all().map(s=>({...s,data:JSON.parse(s.data)}))});
+      if(method==='GET'&&path==='/balances') {
+        const accounts=db.prepare('SELECT c.exchange,c.label,s.time,s.data FROM snapshots s JOIN connections c ON c.id=s.connection_id ORDER BY c.created').all().map(s=>({...s,...normalizedCapital(s.exchange,JSON.parse(s.data))})).filter(v=>v.equityUsd!==undefined);
+        const total=accounts.reduce((n,v)=>n+units(v.equityUsd),0n);
+        return send(res,200,{totalEquityUsd:decimal(total),updatedAt:accounts.length?Math.min(...accounts.map(v=>v.time)):null,accounts:accounts.map(({data,...v})=>v)});
+      }
       throw new ApiError(404,'Не найдено.');
     } catch(e) {
       // Never return or log exchange request URLs, credentials, raw errors or stack traces.
@@ -115,3 +119,4 @@ export function createApi(db,key,{origin,secure,setupToken,adapterFactory=create
     }
   };
 }
+
