@@ -6,7 +6,7 @@ import { openDatabase,enqueue,savePage } from './database.mjs';
 import { encrypt,decrypt,units,decimal,passwordHash,passwordMatches } from './security.mjs';
 import { createApi } from './api.mjs';
 import { createWorker } from './worker.mjs';
-import { createAdapter,bybitEvent,binanceIncome,okxEvent } from './exchanges.mjs';
+import { createAdapter,bybitEvent,binanceIncome,okxEvent,normalizedCapital } from './exchanges.mjs';
 
 test('AES-GCM authenticates credentials, account identity and ciphertext',()=>{
   const key=randomBytes(32),secret={apiKey:'private-api-key',secret:'sensitive-secret'};
@@ -24,6 +24,12 @@ test('exact decimals, negative funding and rebates',()=>{
   assert.throws(()=>units('NaN'));assert.throws(()=>units('1e10'));
 });
 test('password hashing and verification',()=>{const hash=passwordHash('long-private-password');assert(passwordMatches('long-private-password',hash));assert(!passwordMatches('wrong-password',hash));});
+test('normalizes exchange equity without floating point arithmetic',()=>{
+  assert.equal(normalizedCapital('Bybit',{wallet:{list:[{totalEquity:'123.45'}]}}).equityUsd,'123.45');
+  assert.equal(normalizedCapital('OKX',{wallet:[{totalEq:'55.25'}]}).equityUsd,'55.25');
+  assert.equal(normalizedCapital('Hyperliquid',{wallet:{marginSummary:{accountValue:'9.5'}}}).equityUsd,'9.5');
+  assert.equal(normalizedCapital('Binance',{spotEquityUsd:'10.1',futures:{totalMarginBalance:'20.2'}}).equityUsd,'30.300000000000');
+});
 
 function addConnection(db,key) {
   const id='11111111-1111-4111-8111-111111111111';
@@ -73,3 +79,4 @@ test('HTTP auth, CSRF, encrypted storage, no returned credentials, logout, dedup
     assert.equal((await call('/login',{password:'test-owner-password'})).status,429);
   } finally {await new Promise(r=>server.close(r));db.close();}
 });
+
