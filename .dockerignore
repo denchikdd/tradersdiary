@@ -1,0 +1,16 @@
+node_modules
+.git
+.next
+.vinext
+dist
+.wrangler
+.journal-local
+.env*
+.sites-runtime
+.agents
+.codex
+outputs
+work
+*.tsbuildinfo
+*.sqlite*
+*.db
