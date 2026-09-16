@@ -12,8 +12,13 @@ export const catalog = [
 const hmac = (secret, text, encoding='hex') => createHmac('sha256',secret).update(text).digest(encoding);
 export class ExchangeError extends Error { constructor(message, retryable=false) { super(message); this.retryable=retryable; } }
 const delay = ms => new Promise(resolve=>setTimeout(resolve, ms));
+const multiply = (a,b) => decimal(units(a)*units(b)/(10n**12n));
 // No arbitrary URLs, redirects or trading endpoints are accepted by these adapters.
 export function createAdapter(exchange, credentials, options={}, fetchImpl=fetch) {
+  async function publicJson(url) {
+    let response;try{response=await fetchImpl(url,{method:'GET',redirect:'error',signal:AbortSignal.timeout(20000)});}catch{return null;}
+    if(!response.ok)return null;try{return JSON.parse(await response.text());}catch{return null;}
+  }
   async function request(path, params={}) {
     await delay(fetchImpl === fetch ? 180 : 0);
     let url, init = {method:'GET',redirect:'error',signal:AbortSignal.timeout(20000),headers:{}};
@@ -65,8 +70,18 @@ export function createAdapter(exchange, credentials, options={}, fetchImpl=fetch
     if(exchange==='OKX') return {wallet:await request('/api/v5/account/balance'),positions:await request('/api/v5/account/positions')};
     if(exchange==='Hyperliquid') return {wallet:await request('clearinghouseState')};
     const result={};
-    if(options.spotSymbols?.length) result.spot=await request('/api/v3/account');
+    result.spot=await request('/api/v3/account');
     if(options.futures!==false) result.futures=await request('/fapi/v3/account');
+    const tickers=await publicJson('https://api.binance.com/api/v3/ticker/price');
+    if(Array.isArray(tickers)) {
+      const prices=new Map(tickers.map(v=>[v.symbol,v.price]));let total=0n,unvalued=[];
+      for(const b of result.spot?.balances||[]) {
+        const amount=units(b.free||'0')+units(b.locked||'0');if(!amount)continue;
+        const price=['USDT','USDC','FDUSD'].includes(b.asset)?'1':prices.get(b.asset+'USDT');
+        if(price)total+=units(multiply(decimal(amount),price));else unvalued.push(b.asset);
+      }
+      result.spotEquityUsd=decimal(total);result.unvaluedSpotAssets=unvalued;
+    }
     return result;
   }
   function streams(now) {
@@ -117,6 +132,15 @@ export function createAdapter(exchange, credentials, options={}, fetchImpl=fetch
   return {verify,snapshot,streams,page};
 }
 
+export function normalizedCapital(exchange,data) {
+  let equity='0',available=null,unrealized=null,scope='account',warning=null;
+  if(exchange==='Bybit') {const v=data.wallet?.list?.[0]||{};equity=v.totalEquity||'0';available=v.totalAvailableBalance||null;unrealized=v.totalPerpUPL||null;}
+  else if(exchange==='OKX') {const v=data.wallet?.[0]||{};equity=v.totalEq||'0';available=v.availEq||null;unrealized=v.upl||null;}
+  else if(exchange==='Hyperliquid') {const v=data.wallet?.marginSummary||{};equity=v.accountValue||'0';available=v.totalRawUsd||null;unrealized=v.totalNtlPos&&v.accountValue?decimal(units(v.accountValue)-units(v.totalRawUsd||v.accountValue)):null;scope='perpetuals';}
+  else if(exchange==='Binance') {const futures=data.futures?.totalMarginBalance||data.futures?.totalWalletBalance||'0',spot=data.spotEquityUsd||'0';equity=decimal(units(futures)+units(spot));available=data.futures?.availableBalance||null;unrealized=data.futures?.totalUnrealizedProfit||null;scope='spot+usd-m-futures';if(data.unvaluedSpotAssets?.length)warning=`Не оценены spot-активы: ${data.unvaluedSpotAssets.join(', ')}`;}
+  try{units(equity);}catch{return null;}return {equityUsd:equity,availableUsd:available,unrealizedPnlUsd:unrealized,scope,warning};
+}
+
 export function bybitEvent(v,type,market) {
   const e={id:String(type==='fills'?v.execId:v.id),time:Number(type==='fills'?v.execTime:v.transactionTime),kind:type==='fills'?'fill':'transfer',market,symbol:v.symbol||'',currency:v.currency||v.feeCurrency||'',gross:'0',fee:'0',funding:'0',raw:v};
   if(type==='ledger' && ['TRADE','SETTLEMENT','LIQUIDATION','ADL'].includes(v.type)) {
@@ -144,3 +168,4 @@ export function hyperliquidEvent(v,type) {
   const funding=type==='funding', spot=!funding&&String(v.coin).startsWith('@');
   return {id:funding?`${v.hash}:${v.delta.coin}`:String(v.tid),time:Number(v.time),kind:spot?'fill':'pnl',market:spot?'spot':'futures',symbol:funding?v.delta.coin:v.coin,currency:funding?'USDC':v.feeToken||'USDC',gross:funding?'0':v.closedPnl||'0',fee:funding?'0':v.fee||'0',funding:funding?v.delta.usdc||'0':'0',raw:v};
 }
+
