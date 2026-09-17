@@ -48,4 +48,3 @@ Spot fills сохраняются, но без себестоимости нач
 - https://mexcdevelop.github.io/apidocs/spot_v3_en/
 - https://mexcdevelop.github.io/apidocs/contract_v1_en/
 - https://github.com/elliottech/lighter-python
-
