@@ -99,7 +99,7 @@ export function createApi(db,key,{origin,secure,setupToken,adapterFactory=create
           row.gross+=units(e.gross);row.fee+=units(e.fee);row.funding+=units(e.funding);groups.set(id,row);
         }
         const rows=[...groups.values()].map(r=>({...r,gross:cents(decimal(r.gross)),fee:cents(decimal(r.fee)),funding:cents(decimal(r.funding))}));
-        return send(res,200,{rows,unvalued,notice:'Реализованный PnL фьючерсов. USDT/USDC приняты за 1 USD. Spot сохранён как исполнения, но прибыль не рассчитана без проверенной себестоимости. Проценты недоступны до восстановления капитала.'});
+        return send(res,200,{rows,unvalued,notice:'Реализованный PnL фьючерсов. USDT/USDC приняты за 1 USD. Spot сохранён как исполнения, но прибыль не рассчитана без проверенной себестоимости. Процент PnL считается от текущего общего капитала всех подключённых счетов.'});
       }
       if(method==='GET'&&path==='/fills') {
         const from=Date.parse(url.searchParams.get('from')),to=Date.parse(url.searchParams.get('to'));
@@ -120,4 +120,5 @@ export function createApi(db,key,{origin,secure,setupToken,adapterFactory=create
     }
   };
 }
+
 
