@@ -14,7 +14,7 @@ Node.js 24, встроенный node:sqlite, SQLite WAL на постоянно
 | Hyperliquid | perpetual fills/funding | API ограничивает fills последними 10 000, spot-PnL не рассчитывается |
 | Gate.io | spot fills, USDT futures account book (PnL/fees/funding) | импорт окнами; полнота зависит от retention API аккаунта |
 | Bitget | USDT/USDC futures account bills, spot/futures balance | 89 дней; отдельный Read-Only ключ и passphrase |
-| Aster | публичные futures/spot fills и текущий баланс по адресу | Chain RPC, история с genesis окнами по 7 дней; при privacy mode часть данных скрыта; RPC не отдаёт realized PnL/fee |
+| Aster | баланс Futures/spot stablecoins и журнал income через read-only API key | V3/V1 private API; public Chain RPC не используется для приватных аккаунтов |
 | KuCoin | USDT futures ledger, spot/futures balance | однодневные окна; ключ только с General/read, без transfer/withdrawal |
 | MEXC | spot fills и futures deals перечисленных пар | spot — только последний месяц; futures — до 90 дней на окно |
 | Lighter | текущий публичный баланс аккаунта | приватная история пока не импортируется: официальный signer требует отдельный API private key и account index |
@@ -26,7 +26,7 @@ Node.js 24, встроенный node:sqlite, SQLite WAL на постоянно
 
 Календарь показывает фьючерсный PnL в USDT/USDC, условно 1:1 к USD. Это не историческая USD-переоценка. Другие валюты сохраняются, но исключаются с предупреждением. Bonus, insurance и отдельные типы rebates пока не входят в результат. Нужна сверка с биржевым отчётом.
 
-Spot fills сохраняются, но без себестоимости начального остатка, комиссий в сторонних монетах и движений активов прибыль spot не рассчитывается. Проценты реальных данных отключены до восстановления капитала. Демо использует базу 25 000 USD.
+Spot fills сохраняются, но без себестоимости начального остатка, комиссий в сторонних монетах и движений активов прибыль spot не рассчитывается. Проценты реальных данных считаются от текущего общего капитала всех подключённых счетов. Демо использует базу 25 000 USD.
 
 Календарь группирует записи по дате, подключению, символу и валюте; их количество не равно числу закрытых сделок. «История» показывает отдельные fills, если адаптер их получает. CSV dashboard содержит записи PnL, не оригинальные fills.
 
