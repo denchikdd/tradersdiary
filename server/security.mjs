@@ -43,4 +43,3 @@ export function decimal(value) {
   return `${n < 0n ? '-' : ''}${a / SCALE}.${String(a % SCALE).padStart(12, '0')}`;
 }
 export function cents(value) { return Number(units(value)) / 1e10; }
-
