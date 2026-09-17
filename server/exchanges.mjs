@@ -7,7 +7,7 @@ export const catalog = [
   { id:'Bybit', enabled:true, passphrase:false, notice:'Единый аккаунт UTA: исполнения spot/linear и журнал PnL за последние 2 года. Старый Classic Account не поддерживается.' },
   { id:'Binance', enabled:true, passphrase:false, notice:'USDⓈ-M: журнал доходов за доступные API 3 месяца; spot — история указанных пар. Пары spot нужно перечислить, включая закрытые позиции.' },
   { id:'OKX', enabled:true, passphrase:true, notice:'Исполнения и финансовый журнал за последние 3 месяца. Для старой истории потребуется архив биржи.' },
-  { id:'Hyperliquid', enabled:true, address:true, notice:'Только публичный адрес кошелька. Perpetuals: до 10 000 последних исполнений; приватный ключ не нужен.' },
+  { id:'Hyperliquid', enabled:true, address:true, notice:'Только публичный адрес кошелька. Баланс берётся из объединённого Portfolio; история perpetuals — из публичного API. Приватный ключ не нужен.' },
   { id:'Gate.io',enabled:true,notice:'Spot и USDT perpetuals. История биржи загружается доступными окнами API.' },
   { id:'Bitget',enabled:true,passphrase:true,notice:'USDT/USDC Futures и spot-баланс. Создайте отдельный ключ Read-Only.' },
   { id:'Aster',enabled:true,notice:'Aster V3: адрес и приватный ключ отдельного API Wallet с разрешением Read. Не используйте приватный ключ основного кошелька.' },
@@ -78,7 +78,10 @@ export function createAdapter(exchange, credentials, options={}, fetchImpl=fetch
   async function snapshot() {
     if(exchange==='Bybit') return {wallet:await request('/v5/account/wallet-balance',{accountType:'UNIFIED'})};
     if(exchange==='OKX') return {wallet:await request('/api/v5/account/balance'),positions:await request('/api/v5/account/positions')};
-    if(exchange==='Hyperliquid') return {wallet:await request('clearinghouseState')};
+    if(exchange==='Hyperliquid') {
+      const [wallet,spot,portfolio]=await Promise.all([request('clearinghouseState'),request('spotClearinghouseState'),request('portfolio')]);
+      return {wallet,spot,portfolio};
+    }
     const result={};
     result.spot=await request('/api/v3/account');
     if(options.futures!==false) result.futures=await request('/fapi/v3/account');
@@ -149,7 +152,15 @@ export function normalizedCapital(exchange,data) {
   let equity='0',available=null,unrealized=null,scope='account',warning=null;
   if(exchange==='Bybit') {const v=data.wallet?.list?.[0]||{};equity=v.totalEquity||'0';available=v.totalAvailableBalance||null;unrealized=v.totalPerpUPL||null;}
   else if(exchange==='OKX') {const v=data.wallet?.[0]||{};equity=v.totalEq||'0';available=v.availEq||null;unrealized=v.upl||null;}
-  else if(exchange==='Hyperliquid') {const v=data.wallet?.marginSummary||{};equity=v.accountValue||'0';available=v.totalRawUsd||null;unrealized=v.totalNtlPos&&v.accountValue?decimal(units(v.accountValue)-units(v.totalRawUsd||v.accountValue)):null;scope='perpetuals';}
+  else if(exchange==='Hyperliquid') {
+    const periods=Array.isArray(data.portfolio)?Object.fromEntries(data.portfolio):{};
+    const history=periods.day?.accountValueHistory||periods.allTime?.accountValueHistory||[];
+    const portfolioValue=history.length?history[history.length-1]?.[1]:null;
+    const v=data.wallet?.marginSummary||{};
+    equity=portfolioValue||v.accountValue||'0';available=v.totalRawUsd||null;
+    unrealized=v.totalNtlPos&&v.accountValue?decimal(units(v.accountValue)-units(v.totalRawUsd||v.accountValue)):null;
+    scope=portfolioValue?'portfolio':'perpetuals';
+  }
   else if(exchange==='Binance') {const futures=data.futures?.totalMarginBalance||data.futures?.totalWalletBalance||'0',spot=data.spotEquityUsd||'0';equity=decimal(units(futures)+units(spot));available=data.futures?.availableBalance||null;unrealized=data.futures?.totalUnrealizedProfit||null;scope='spot+usd-m-futures';if(data.unvaluedSpotAssets?.length)warning=`Не оценены spot-активы: ${data.unvaluedSpotAssets.join(', ')}`;}
   try{units(equity);}catch{return null;}return {equityUsd:equity,availableUsd:available,unrealizedPnlUsd:unrealized,scope,warning};
 }
