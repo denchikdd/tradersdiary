@@ -14,7 +14,7 @@ Node.js 24, встроенный node:sqlite, SQLite WAL на постоянно
 | Hyperliquid | perpetual fills/funding | API ограничивает fills последними 10 000, spot-PnL не рассчитывается |
 | Gate.io | spot fills, USDT futures account book (PnL/fees/funding) | импорт окнами; полнота зависит от retention API аккаунта |
 | Bitget | USDT/USDC futures account bills, spot/futures balance | 89 дней; отдельный Read-Only ключ и passphrase |
-| Aster | perpetual income: realized PnL/commission/funding | 89 дней, 7-дневные окна; HMAC API Aster Pro |
+| Aster | публичные futures/spot fills и текущий баланс по адресу | Chain RPC, история с genesis окнами по 7 дней; при privacy mode часть данных скрыта; RPC не отдаёт realized PnL/fee |
 | KuCoin | USDT futures ledger, spot/futures balance | однодневные окна; ключ только с General/read, без transfer/withdrawal |
 | MEXC | spot fills и futures deals перечисленных пар | spot — только последний месяц; futures — до 90 дней на окно |
 | Lighter | текущий публичный баланс аккаунта | приватная история пока не импортируется: официальный signer требует отдельный API private key и account index |
