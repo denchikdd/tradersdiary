@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { randomBytes } from 'node:crypto';
+import { createHash,createHmac,randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
 import { openDatabase,enqueue,savePage } from './database.mjs';
 import { encrypt,decrypt,units,decimal,passwordHash,passwordMatches } from './security.mjs';
@@ -67,6 +67,72 @@ test('all requested exchange adapters are enabled and sign read requests',async(
   ];
   for(const [name,credentials,options,response,headersOk] of cases){let called;const adapter=createAdapter(name,credentials,options,async(url,init)=>{called={url,init};return new Response(JSON.stringify(response));});await adapter.verify();assert(headersOk(called.init.headers),`${name} auth headers`);assert(called.init.redirect==='error');if(name==='Aster'){assert(called.url.includes('signer=0x7E5F'));assert(called.url.includes('nonce='));assert(called.url.includes('signature=0x'));assert(!called.url.includes(credentials.secret));}}
 });
+test('KuCoin uses current v3 authentication and falls back to legacy v2 keys',async()=>{
+  const credentials={apiKey:'key123',secret:'secret123',passphrase:'pass'},calls=[];
+  const adapter=createAdapter('KuCoin',credentials,{},async(url,init)=>{
+    calls.push({url,init});
+    if(init.headers['KC-API-KEY-VERSION']==='3')return new Response(JSON.stringify({code:'400004',msg:'KC-API-PASSPHRASE error'}),{status:401});
+    return new Response(JSON.stringify({code:'200000',data:{permission:'General',apiVersion:2}}));
+  });
+  await adapter.verify();
+  assert.deepEqual(calls.map(v=>v.init.headers['KC-API-KEY-VERSION']),['3','2']);
+  const headers=calls[0].init.headers,ts=headers['KC-API-TIMESTAMP'];
+  assert.equal(headers['KC-API-SIGN'],createHmac('sha256',credentials.secret).update(ts+'GET/api/v1/user/api-key').digest('base64'));
+  assert.equal(headers['KC-API-PASSPHRASE'],createHmac('sha256',credentials.secret).update(credentials.passphrase).digest('base64'));
+  assert.equal(headers['Content-Type'],'application/json');
+});
+test('KuCoin authentication errors include the exchange code and explanation',async()=>{
+  const adapter=createAdapter('KuCoin',{apiKey:'key123',secret:'secret123',passphrase:'wrong'}, {},async()=>new Response(JSON.stringify({code:'400006',msg:'The requested ip address is not on the api whitelist'}),{status:401}));
+  await assert.rejects(adapter.verify(),/IP сервера не добавлен.*код 400006/);
+});
+test('Gate futures ledger signs and requests each supported type separately',async()=>{
+  const credentials={apiKey:'gate-key',secret:'gate-secret'},calls=[];
+  const adapter=createAdapter('Gate.io',credentials,{},async(url,init)=>{calls.push({url,init});return new Response('[]');});
+  assert.deepEqual(adapter.streams(Date.now()).map(v=>v.id),['spot','futures:pnl','futures:fee','futures:fund']);
+  await adapter.page('futures:fee',Date.UTC(2026,0,1),Date.UTC(2026,0,2)-1);
+  const {url,init}=calls[0],parsed=new URL(url),rawQuery=decodeURIComponent(parsed.search.slice(1)),bodyHash=createHash('sha512').update('').digest('hex');
+  assert.equal(parsed.searchParams.get('type'),'fee');
+  assert.equal(parsed.searchParams.has('page'),false);
+  assert.equal(init.headers.SIGN,createHmac('sha512',credentials.secret).update(`GET\n${parsed.pathname}\n${rawQuery}\n${bodyHash}\n${init.headers.Timestamp}`).digest('hex'));
+});
+test('Bitget automatically switches UTA accounts to v3 assets and fills',async()=>{
+  const options={},calls=[];
+  const adapter=createAdapter('Bitget',{apiKey:'bitget-key',secret:'bitget-secret',passphrase:'pass'},options,async(url,init)=>{
+    calls.push({url,init});
+    if(url.includes('/api/v2/'))return new Response(JSON.stringify({code:'40085',msg:'Unified Account mode'}),{status:400});
+    if(url.includes('/api/v3/account/info'))return new Response(JSON.stringify({code:'00000',data:{permType:'read-only',permissions:['uta_mgt','uta_trade']}}));
+    if(url.includes('/api/v3/account/assets'))return new Response(JSON.stringify({code:'00000',data:{accountEquity:'125.50',assets:[]}}));
+    if(url.includes('/api/v3/trade/fills'))return new Response(JSON.stringify({code:'00000',data:{list:[{execId:'e1',category:'USDT-FUTURES',symbol:'BTCUSDT',createdTime:'1750141421721',execPnl:'4.5',feeDetail:[{feeCoin:'USDT',fee:'0.25'}]}],cursor:''}}));
+    throw new Error(`Unexpected URL ${url}`);
+  });
+  await adapter.verify();
+  assert.equal(options.accountMode,'uta');
+  assert(adapter.streams(Date.now()).some(v=>v.id==='uta-fills:USDT-FUTURES'));
+  const page=await adapter.page('uta-fills:USDT-FUTURES',Date.now()-86400000,Date.now());
+  assert.deepEqual(page.events.map(v=>v.kind),['fill','pnl']);
+  assert.equal(page.events[1].gross,'4.500000000000');
+  assert.equal(page.events[1].fee,'0.250000000000');
+  assert(calls.every(v=>v.init.headers['Content-Type']==='application/json'));
+});
+test('Bitget accepts alternate read-only spelling returned for a UTA key',async()=>{
+  const options={};
+  const adapter=createAdapter('Bitget',{apiKey:'bitget-key',secret:'bitget-secret',passphrase:'pass'},options,async url=>{
+    if(url.includes('/api/v2/'))return new Response(JSON.stringify({code:'40085',msg:'Unified Account mode'}),{status:400});
+    if(url.includes('/api/v3/account/info'))return new Response(JSON.stringify({code:'00000',data:{permType:'read_only',permissions:['UTA_MGT','UTA_TRADE']}}));
+    if(url.includes('/api/v3/account/assets'))return new Response(JSON.stringify({code:'00000',data:{accountEquity:'125.50',assets:[]}}));
+    throw new Error(`Unexpected URL ${url}`);
+  });
+  await adapter.verify();
+  assert.equal(options.accountMode,'uta');
+});
+test('Bitget rejects a UTA key that explicitly has write access',async()=>{
+  const adapter=createAdapter('Bitget',{apiKey:'bitget-key',secret:'bitget-secret',passphrase:'pass'},{},async url=>{
+    if(url.includes('/api/v2/'))return new Response(JSON.stringify({code:'40085',msg:'Unified Account mode'}),{status:400});
+    if(url.includes('/api/v3/account/info'))return new Response(JSON.stringify({code:'00000',data:{permType:'read-and-write',permissions:['uta_mgt','uta_trade']}}));
+    throw new Error(`Unexpected URL ${url}`);
+  });
+  await assert.rejects(adapter.verify(),/имеет право записи/);
+});
 test('worker persists pages, resumes after restart and marks snapshot completion',async()=>{
   const db=openDatabase(':memory:'),key=randomBytes(32),id=addConnection(db,key);enqueue(db,id);let calls=0;
   const factory=()=>({streams:()=>[{id:'ledger',start:0,window:100000}],page:async()=>{calls++;return {events:[{id:'e1',time:Date.now(),kind:'pnl',market:'futures',symbol:'BTCUSDT',currency:'USDT',gross:'10',raw:{}}],next:null};},snapshot:async()=>({wallet:[]})});
@@ -93,9 +159,9 @@ test('HTTP auth, CSRF, encrypted storage, no returned credentials, logout, dedup
     const e={id:'a',time:Date.parse('2026-09-16T12:00:00Z'),kind:'pnl',market:'futures',symbol:'BTCUSDT',currency:'USDT',gross:'100.25',fee:'0.25',funding:'-1',raw:{}};
     savePage(db,id,'ledger',[e,{...e,id:'deposit',kind:'transfer',gross:'10000'}],1,{});
     const result=await (await call('/journal?from=2026-09-01&to=2026-09-30')).json();assert.equal(result.rows.length,1);assert.equal(result.rows[0].gross-result.rows[0].fee+result.rows[0].funding,9900);
+    const allTime=await call('/journal?scope=all');assert.equal(allTime.status,200);assert.equal((await allTime.json()).rows.length,1);
     await call('/logout',{});assert.equal((await call('/connections')).status,401);
     for(let i=0;i<12;i++)await call('/login',{password:'wrong-password-long'});
     assert.equal((await call('/login',{password:'test-owner-password'})).status,429);
   } finally {await new Promise(r=>server.close(r));db.close();}
 });
-
