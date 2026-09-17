@@ -10,7 +10,7 @@ export const catalog = [
   { id:'Hyperliquid', enabled:true, address:true, notice:'Только публичный адрес кошелька. Perpetuals: до 10 000 последних исполнений; приватный ключ не нужен.' },
   { id:'Gate.io',enabled:true,notice:'Spot и USDT perpetuals. История биржи загружается доступными окнами API.' },
   { id:'Bitget',enabled:true,passphrase:true,notice:'USDT/USDC Futures и spot-баланс. Создайте отдельный ключ Read-Only.' },
-  { id:'Aster',enabled:true,notice:'Aster Pro Futures: read-only API Key и API Secret. Они нужны, когда публичный адрес скрыт режимом Account Privacy.' },
+  { id:'Aster',enabled:true,notice:'Aster V3: адрес и приватный ключ отдельного API Wallet с разрешением Read. Не используйте приватный ключ основного кошелька.' },
   { id:'KuCoin',enabled:true,passphrase:true,notice:'Spot-баланс и USDT Futures ledger. Оставьте только General/read permission.' },
   { id:'MEXC',enabled:true,notice:'Spot-баланс и история перечисленных spot-пар (API ограничивает историю одним месяцем).' },
   { id:'Lighter',enabled:true,address:true,notice:'Публичный адрес L1: капитал аккаунта. Для полной приватной истории позже понадобится signer API.' },
