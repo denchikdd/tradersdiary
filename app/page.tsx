@@ -8,7 +8,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import { makeDemo, sum, group, dateKey, money, type Trade } from "@/lib/journal";
-const exchanges=["Binance","Bybit","OKX","Gate.io","Bitget","Aster","Hyperliquid"];
+const exchanges=["Binance","Bybit","OKX","Gate.io","Bitget","Aster","Hyperliquid","KuCoin","MEXC","Lighter"];
 const months=["Январь","Февраль","Март","Апрель","Май","Июнь","Июль","Август","Сентябрь","Октябрь","Ноябрь","Декабрь"];
 type Period={start:string;end:string;title:string};
 const sign=(n:number)=>n>0?"positive":n<0?"negative":"neutral";
