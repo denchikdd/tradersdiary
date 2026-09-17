@@ -50,6 +50,10 @@ test('read-only verification rejects write permission and does not follow redire
   const adapter=createAdapter('Bybit',{apiKey:'abc',secret:'def'},{},async(url,init)=>{called={url,init};return new Response(JSON.stringify({retCode:0,result:{readOnly:0}}));});
   await assert.rejects(adapter.verify(),/только для чтения/);assert.equal(called.init.method,'GET');assert.equal(called.init.redirect,'error');assert(called.init.headers['X-BAPI-SIGN']);assert(!called.url.includes('def'));
 });
+test('Bybit history starts inside the rolling two-year boundary',()=>{
+  const now=Date.now(),streams=createAdapter('Bybit',{apiKey:'abc',secret:'def'}).streams(now);
+  assert(streams.every(stream=>stream.start===now-729*86400000));
+});
 test('all requested exchange adapters are enabled and sign read requests',async()=>{
   const expected=['Gate.io','Bitget','Aster','KuCoin','MEXC','Lighter'];assert(expected.every(id=>catalog.find(v=>v.id===id)?.enabled));
   const cases=[
