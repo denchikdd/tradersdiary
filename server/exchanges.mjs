@@ -16,7 +16,7 @@ export const catalog = [
   { id:'Lighter',enabled:true,address:true,notice:'Публичный адрес L1: капитал аккаунта. Для полной приватной истории позже понадобится signer API.' },
 ];
 const hmac = (secret, text, encoding='hex') => createHmac('sha256',secret).update(text).digest(encoding);
-export class ExchangeError extends Error { constructor(message, retryable=false) { super(message); this.retryable=retryable; } }
+export class ExchangeError extends Error { constructor(message, retryable=false) { super(message); this.name='ExchangeError';this.retryable=retryable; } }
 const delay = ms => new Promise(resolve=>setTimeout(resolve, ms));
 const multiply = (a,b) => decimal(units(a)*units(b)/(10n**12n));
 // No arbitrary URLs, redirects or trading endpoints are accepted by these adapters.
@@ -56,7 +56,10 @@ export function createAdapter(exchange, credentials, options={}, fetchImpl=fetch
         typeof value==='number' && Number.isInteger(value) && !Number.isSafeInteger(value) ? context.source : value);
     } catch { throw new ExchangeError('Некорректный ответ биржи.',true); }
     const code=exchange==='Bybit'?body.retCode:exchange==='OKX'?body.code:exchange==='Binance'?body.code:0;
-    if(code!==undefined && Number(code)!==0) throw new ExchangeError(`Ошибка биржи ${Number(code)}. Проверьте ключ, права, IP и тип аккаунта.`,[10006,10000,50011,-1003,-1021].includes(Number(code)));
+    if(code!==undefined && Number(code)!==0) {
+      const detail=String(body.retMsg||body.msg||'').replace(/[\r\n]+/g,' ').slice(0,180);
+      throw new ExchangeError(`Ошибка биржи ${Number(code)}${detail?`: ${detail}`:''}. Проверьте ключ, права, IP и тип аккаунта.`,[10006,10000,50011,-1003,-1021].includes(Number(code)));
+    }
     return exchange==='Bybit'?body.result:exchange==='OKX'?body.data:body;
   }
   async function verify() {
@@ -92,7 +95,9 @@ export function createAdapter(exchange, credentials, options={}, fetchImpl=fetch
     return result;
   }
   function streams(now) {
-    if(exchange==='Bybit') return ['fills:spot','fills:linear','ledger:linear'].map(id=>({id,start:now-730*DAY,window:7*DAY}));
+    // Keep a one-day cushion: Bybit rejects the exact rolling two-year boundary
+    // when its server clock advances between creating the stream and the request.
+    if(exchange==='Bybit') return ['fills:spot','fills:linear','ledger:linear'].map(id=>({id,start:now-729*DAY,window:7*DAY}));
     if(exchange==='Binance') return [
       ...(options.futures!==false?[{id:'income',start:now-89*DAY,window:7*DAY}]:[]),
       ...(options.spotSymbols||[]).map(symbol=>({id:'spot:'+symbol,start:Date.UTC(2017,6,1),window:DAY})),
