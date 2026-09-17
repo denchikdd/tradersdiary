@@ -1,5 +1,6 @@
 import { createHmac } from 'node:crypto';
 import { decimal, units } from './security.mjs';
+import { createExtraAdapter } from './exchanges-extra.mjs';
 
 export const DAY = 86400000;
 export const catalog = [
@@ -7,7 +8,12 @@ export const catalog = [
   { id:'Binance', enabled:true, passphrase:false, notice:'USDⓈ-M: журнал доходов за доступные API 3 месяца; spot — история указанных пар. Пары spot нужно перечислить, включая закрытые позиции.' },
   { id:'OKX', enabled:true, passphrase:true, notice:'Исполнения и финансовый журнал за последние 3 месяца. Для старой истории потребуется архив биржи.' },
   { id:'Hyperliquid', enabled:true, address:true, notice:'Только публичный адрес кошелька. Perpetuals: до 10 000 последних исполнений; приватный ключ не нужен.' },
-  ...['Gate.io','Bitget','Aster'].map(id=>({id,enabled:false,notice:'Адаптер ещё не доступен для реальных ключей.'})),
+  { id:'Gate.io',enabled:true,notice:'Spot и USDT perpetuals. История биржи загружается доступными окнами API.' },
+  { id:'Bitget',enabled:true,passphrase:true,notice:'USDT/USDC Futures и spot-баланс. Создайте отдельный ключ Read-Only.' },
+  { id:'Aster',enabled:true,notice:'Aster Pro perpetuals. История income доступна через официальный HMAC API.' },
+  { id:'KuCoin',enabled:true,passphrase:true,notice:'Spot-баланс и USDT Futures ledger. Оставьте только General/read permission.' },
+  { id:'MEXC',enabled:true,notice:'Spot-баланс и история перечисленных spot-пар (API ограничивает историю одним месяцем).' },
+  { id:'Lighter',enabled:true,address:true,notice:'Публичный адрес L1: капитал аккаунта. Для полной приватной истории позже понадобится signer API.' },
 ];
 const hmac = (secret, text, encoding='hex') => createHmac('sha256',secret).update(text).digest(encoding);
 export class ExchangeError extends Error { constructor(message, retryable=false) { super(message); this.retryable=retryable; } }
@@ -15,6 +21,7 @@ const delay = ms => new Promise(resolve=>setTimeout(resolve, ms));
 const multiply = (a,b) => decimal(units(a)*units(b)/(10n**12n));
 // No arbitrary URLs, redirects or trading endpoints are accepted by these adapters.
 export function createAdapter(exchange, credentials, options={}, fetchImpl=fetch) {
+  if(['Gate.io','Bitget','Aster','KuCoin','MEXC','Lighter'].includes(exchange))return createExtraAdapter(exchange,credentials,options,fetchImpl);
   async function publicJson(url) {
     let response;try{response=await fetchImpl(url,{method:'GET',redirect:'error',signal:AbortSignal.timeout(20000)});}catch{return null;}
     if(!response.ok)return null;try{return JSON.parse(await response.text());}catch{return null;}
@@ -133,6 +140,7 @@ export function createAdapter(exchange, credentials, options={}, fetchImpl=fetch
 }
 
 export function normalizedCapital(exchange,data) {
+  if(data?.equityUsd!==undefined)return {equityUsd:data.equityUsd,availableUsd:data.availableUsd||null,unrealizedPnlUsd:data.unrealizedPnlUsd||null,scope:data.scope||'account',warning:data.warning||null};
   let equity='0',available=null,unrealized=null,scope='account',warning=null;
   if(exchange==='Bybit') {const v=data.wallet?.list?.[0]||{};equity=v.totalEquity||'0';available=v.totalAvailableBalance||null;unrealized=v.totalPerpUPL||null;}
   else if(exchange==='OKX') {const v=data.wallet?.[0]||{};equity=v.totalEq||'0';available=v.availEq||null;unrealized=v.upl||null;}
