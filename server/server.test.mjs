@@ -29,6 +29,7 @@ test('password hashing and verification',()=>{const hash=passwordHash('long-priv
 test('normalizes exchange equity without floating point arithmetic',()=>{
   assert.equal(normalizedCapital('Bybit',{wallet:{list:[{totalEquity:'123.45'}]}}).equityUsd,'123.45');
   assert.equal(normalizedCapital('OKX',{wallet:[{totalEq:'55.25'}]}).equityUsd,'55.25');
+  assert.equal(normalizedCapital('Hyperliquid',{wallet:{marginSummary:{accountValue:'0'}},portfolio:[['day',{accountValueHistory:[[1,'210.374011']]}]]}).equityUsd,'210.374011');
   assert.equal(normalizedCapital('Hyperliquid',{wallet:{marginSummary:{accountValue:'9.5'}}}).equityUsd,'9.5');
   assert.equal(normalizedCapital('Binance',{spotEquityUsd:'10.1',futures:{totalMarginBalance:'20.2'}}).equityUsd,'30.300000000000');
 });
