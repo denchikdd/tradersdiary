@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useState } from 'react';
-import { Eye, EyeOff, WalletCards } from 'lucide-react';
+import { ChevronDown, Eye, EyeOff, WalletCards } from 'lucide-react';
 import { percentOfCapital, type Trade } from '@/lib/journal';
 
 type Connection={id:string;exchange:string;label:string;start:number;status:string;error:string|null;synced:number|null;records:number;earliest:number|null;disabled:number};
@@ -26,10 +26,13 @@ export function usePortfolioCapital(enabled:boolean) {
   return {data,error};
 }
 export function CapitalCard({data,error}:{data:PortfolioCapital|null;error:string}) {
-  const [hidden,setHidden]=useState(true);
+  const [hidden,setHidden]=useState(true),[expanded,setExpanded]=useState(false);
   const toggle=()=>setHidden(v=>!v);
   const total=Number(data?.totalEquityUsd||0).toLocaleString('ru-RU',{style:'currency',currency:'USD',minimumFractionDigits:2});
-  const count=data?.accounts?.length||0;return <section className="capital-card" aria-label="Общий капитал"><WalletCards size={18}/><div><span>Общий капитал</span><strong aria-label={hidden?'Капитал скрыт':total}>{hidden?'•••••• $':count?total:'—'}</strong><small>{error?'Не удалось обновить':count?`${count} подключений · обновлено ${new Date(data?.updatedAt||0).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'})}`:'Подключите биржу'}</small></div><button className="icon-button" onClick={toggle} aria-label={hidden?'Показать капитал':'Скрыть капитал'}>{hidden?<Eye size={17}/>:<EyeOff size={17}/>}</button></section>;
+  const count=data?.accounts?.length||0;
+  const balances=(data?.accounts||[]).reduce<Array<{exchange:string;equity:number;accounts:number}>>((result,account)=>{const current=result.find(v=>v.exchange===account.exchange);if(current){current.equity+=Number(account.equityUsd||0);current.accounts+=1;}else result.push({exchange:account.exchange,equity:Number(account.equityUsd||0),accounts:1});return result;},[]);
+  const format=(value:number)=>value.toLocaleString('ru-RU',{style:'currency',currency:'USD',minimumFractionDigits:2});
+  return <div className="capital-popover"><section className="capital-card" aria-label="Общий капитал"><button className="capital-card-main" onClick={()=>setExpanded(v=>!v)} aria-expanded={expanded} aria-controls="capital-breakdown"><WalletCards size={18}/><span className="capital-copy"><span>Общий капитал</span><strong aria-label={hidden?'Капитал скрыт':total}>{hidden?'•••••• $':count?total:'—'}</strong><small>{error?'Не удалось обновить':count?`${count} подключений · обновлено ${new Date(data?.updatedAt||0).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'})}`:'Подключите биржу'}</small></span></button><div className="capital-actions"><button className="icon-button" onClick={toggle} aria-label={hidden?'Показать капитал':'Скрыть капитал'}>{hidden?<Eye size={17}/>:<EyeOff size={17}/>}</button><button className="icon-button" onClick={()=>setExpanded(v=>!v)} aria-label={expanded?'Скрыть балансы бирж':'Показать балансы бирж'} aria-expanded={expanded}><ChevronDown className={expanded?'expanded':''} size={17}/></button></div></section>{expanded&&<div id="capital-breakdown" className="capital-breakdown"><div className="capital-breakdown-head"><span>Баланс по биржам</span><small>{balances.length} {balances.length===1?'биржа':'бирж'}</small></div>{balances.map(item=><div className="capital-balance-row" key={item.exchange}><span><b>{item.exchange}</b>{item.accounts>1&&<small>{item.accounts} счёта</small>}</span><strong aria-label={hidden?'Баланс скрыт':format(item.equity)}>{hidden?'•••••• $':format(item.equity)}</strong></div>)}{!balances.length&&<p>После синхронизации здесь появятся балансы.</p>}<div className="capital-breakdown-total"><span>Общий капитал</span><strong>{hidden?'•••••• $':count?total:'—'}</strong></div></div>}</div>;
 }
 export function AccountAnalytics({enabled,unit,capitalUsd}:{enabled:boolean;unit:'usd'|'percent';capitalUsd:number}) {
   const [period,setPeriod]=useState<'day'|'week'|'month'|'year'>('month'),[rows,setRows]=useState<Trade[]>([]),[accounts,setAccounts]=useState<Array<CapitalAccount&{availableUsd:string|null}>>([]);
