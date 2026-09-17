@@ -19,10 +19,15 @@ export function useServerJournal(from:string,to:string,enabled:boolean) {
   return {rows,notice,error,refresh:()=>setRevision(v=>v+1)};
 }
 type CapitalAccount={exchange:string;label:string;time:number;equityUsd:string;warning:string|null};
-export function CapitalCard({enabled}:{enabled:boolean}) {
-  const [data,setData]=useState<{totalEquityUsd:string;updatedAt:number|null;accounts:CapitalAccount[]}|null>(null),[hidden,setHidden]=useState(false),[error,setError]=useState('');
+export type PortfolioCapital={totalEquityUsd:string;updatedAt:number|null;accounts:CapitalAccount[]};
+export function usePortfolioCapital(enabled:boolean) {
+  const [data,setData]=useState<PortfolioCapital|null>(null),[error,setError]=useState('');
+  useEffect(()=>{if(!enabled){setData(null);setError('');return;}let active=true;async function load(){try{const v=await journalApi<PortfolioCapital>('/balances');if(active){setData(v);setError('');}}catch(e){if(active)setError((e as Error).message);}}void load();const timer=setInterval(load,30000);return()=>{active=false;clearInterval(timer);};},[enabled]);
+  return {data,error};
+}
+export function CapitalCard({data,error}:{data:PortfolioCapital|null;error:string}) {
+  const [hidden,setHidden]=useState(false);
   useEffect(()=>{setHidden(localStorage.getItem('journal-capital-hidden')==='1');},[]);
-  useEffect(()=>{if(!enabled){setData(null);return;}let active=true;async function load(){try{const v=await journalApi<typeof data>('/balances');if(active){setData(v);setError('');}}catch(e){if(active)setError((e as Error).message);}}void load();const timer=setInterval(load,30000);return()=>{active=false;clearInterval(timer);};},[enabled]);
   const toggle=()=>setHidden(v=>{localStorage.setItem('journal-capital-hidden',v?'0':'1');return !v;});
   const total=Number(data?.totalEquityUsd||0).toLocaleString('ru-RU',{style:'currency',currency:'USD',minimumFractionDigits:2});
   const count=data?.accounts?.length||0;return <section className="capital-card" aria-label="Общий капитал"><WalletCards size={18}/><div><span>Общий капитал</span><strong aria-label={hidden?'Капитал скрыт':total}>{hidden?'•••••• $':count?total:'—'}</strong><small>{error?'Не удалось обновить':count?`${count} подключений · обновлено ${new Date(data?.updatedAt||0).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'})}`:'Подключите биржу'}</small></div><button className="icon-button" onClick={toggle} aria-label={hidden?'Показать капитал':'Скрыть капитал'}>{hidden?<Eye size={17}/>:<EyeOff size={17}/>}</button></section>;
