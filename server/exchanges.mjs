@@ -9,7 +9,7 @@ export const catalog = [
   { id:'OKX', enabled:true, passphrase:true, notice:'Исполнения и финансовый журнал за последние 3 месяца. Для старой истории потребуется архив биржи.' },
   { id:'Hyperliquid', enabled:true, address:true, notice:'Только публичный адрес кошелька. Баланс берётся из объединённого Portfolio; история perpetuals — из публичного API. Приватный ключ не нужен.' },
   { id:'Gate.io',enabled:true,notice:'Spot и USDT perpetuals. История биржи загружается доступными окнами API.' },
-  { id:'Bitget',enabled:true,passphrase:true,notice:'USDT/USDC Futures и spot-баланс. Создайте отдельный ключ Read-Only.' },
+  { id:'Bitget',enabled:true,passphrase:true,notice:'Classic и UTA определяются автоматически. Для UTA включите только чтение UTA management и UTA trading; тип ключа должен быть Read-only, без Withdraw.' },
   { id:'Aster',enabled:true,notice:'Aster V3: адрес и приватный ключ отдельного API Wallet с разрешением Read. Не используйте приватный ключ основного кошелька.' },
   { id:'KuCoin',enabled:true,passphrase:true,notice:'Spot-баланс и USDT Futures ledger. Оставьте только General/read permission.' },
   { id:'MEXC',enabled:true,notice:'Spot-баланс и история перечисленных spot-пар (API ограничивает историю одним месяцем).' },
@@ -192,4 +192,3 @@ export function hyperliquidEvent(v,type) {
   const funding=type==='funding', spot=!funding&&String(v.coin).startsWith('@');
   return {id:funding?`${v.hash}:${v.delta.coin}`:String(v.tid),time:Number(v.time),kind:spot?'fill':'pnl',market:spot?'spot':'futures',symbol:funding?v.delta.coin:v.coin,currency:funding?'USDC':v.feeToken||'USDC',gross:funding?'0':v.closedPnl||'0',fee:funding?'0':v.fee||'0',funding:funding?v.delta.usdc||'0':'0',raw:v};
 }
-
