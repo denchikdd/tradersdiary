@@ -18,6 +18,14 @@ export function useServerJournal(from:string,to:string,enabled:boolean) {
   },[from,to,enabled,revision]);
   return {rows,notice,error,refresh:()=>setRevision(v=>v+1)};
 }
+export function useAllServerJournal(enabled:boolean) {
+  const [rows,setRows]=useState<Trade[]>([]),[error,setError]=useState('');
+  useEffect(()=>{if(!enabled){setRows([]);setError('');return;}let active=true;
+    async function load(){try{const data=await journalApi<{rows:Trade[]}>('/journal?scope=all');if(active){setRows(data.rows);setError('');}}catch(e){if(active)setError((e as Error).message);}}
+    void load();const timer=setInterval(load,30000);return()=>{active=false;clearInterval(timer);};
+  },[enabled]);
+  return {rows,error};
+}
 type CapitalAccount={exchange:string;label:string;time:number;equityUsd:string;warning:string|null};
 export type PortfolioCapital={totalEquityUsd:string;updatedAt:number|null;accounts:CapitalAccount[]};
 export function usePortfolioCapital(enabled:boolean) {
@@ -74,4 +82,3 @@ export function RealHistory({from,to,exchange,market}:{from:string;to:string;exc
   const filtered=rows.filter(v=>(exchange==='all'||exchange===v.exchange)&&(market==='all'||market===v.market));
   return <div><p className="info-note">Исполнения биржи. Цена и комиссия — в исходных валютах; прибыль spot здесь не рассчитывается. Фильтры применяются к текущей странице.</p>{error&&<p role="alert">{error}</p>}<table className="real-history"><thead><tr>{['Дата · UTC','Биржа','Тикер','Сторона','Количество','Цена','Комиссия'].map(v=><th key={v}>{v}</th>)}</tr></thead><tbody>{filtered.map((v,i)=><tr key={v.exchange+v.id+i}><td>{new Date(v.time).toISOString().replace('T',' ').slice(0,19)}</td><td>{v.exchange}</td><td>{v.symbol}</td><td>{v.side}</td><td>{v.quantity}</td><td>{v.price}</td><td>{v.fee} {v.currency}</td></tr>)}</tbody></table>{!filtered.length&&<p className="empty-state">Нет исполнений на этой странице</p>}<div className="connection-actions"><button className="secondary-button" disabled={!offset} onClick={()=>setOffset(v=>Math.max(0,v-200))}>Назад</button><button className="secondary-button" disabled={!more} onClick={()=>setOffset(v=>v+200)}>Далее</button></div></div>;
 }
-
