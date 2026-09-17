@@ -31,12 +31,16 @@ export function readKey(value) {
 const SCALE = 10n ** 12n;
 export function units(value = '0') {
   const str = String(value || '0');
-  if (!/^-?\d+(\.\d{1,12})?$/.test(str)) throw new Error('Invalid decimal');
+  if (!/^-?\d+(\.\d+)?$/.test(str)) throw new Error('Invalid decimal');
   const [whole, fraction = ''] = str.replace('-', '').split('.');
-  return (BigInt(whole) * SCALE + BigInt(fraction.padEnd(12, '0'))) * (str.startsWith('-') ? -1n : 1n);
+  let fractional=BigInt(fraction.slice(0,12).padEnd(12,'0'));
+  if(fraction.length>12&&Number(fraction[12])>=5)fractional+=1n;
+  const carry=fractional>=SCALE?1n:0n;if(carry)fractional-=SCALE;
+  return (BigInt(whole) * SCALE + carry*SCALE + fractional) * (str.startsWith('-') ? -1n : 1n);
 }
 export function decimal(value) {
   const n = BigInt(value), a = n < 0n ? -n : n;
   return `${n < 0n ? '-' : ''}${a / SCALE}.${String(a % SCALE).padStart(12, '0')}`;
 }
 export function cents(value) { return Number(units(value)) / 1e10; }
+
