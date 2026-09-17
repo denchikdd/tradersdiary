@@ -53,7 +53,7 @@ test('all requested exchange adapters are enabled and sign read requests',async(
   const cases=[
     ['Gate.io',{apiKey:'key123',secret:'secret123'},{},[],h=>h.KEY&&h.SIGN],
     ['Bitget',{apiKey:'key123',secret:'secret123',passphrase:'pass'},{},{code:'00000',data:[]},h=>h['ACCESS-SIGN']&&h['ACCESS-PASSPHRASE']],
-    ['Aster',{address:'0x1111111111111111111111111111111111111111'},{},{result:{address:'0x1111111111111111111111111111111111111111'}},h=>h['Content-Type']==='application/json'],
+    ['Aster',{apiKey:'key123',secret:'secret123'},{},{totalMarginBalance:'500'},h=>h['X-MBX-APIKEY']],
     ['KuCoin',{apiKey:'key123',secret:'secret123',passphrase:'pass'},{},{code:'200000',data:{permission:'General'}},h=>h['KC-API-SIGN']&&h['KC-API-PASSPHRASE']],
     ['MEXC',{apiKey:'key123',secret:'secret123'},{futures:false},{balances:[]},h=>h['X-MBX-APIKEY']],
     ['Lighter',{address:'0x1111111111111111111111111111111111111111'},{},{accounts:[{}]},h=>Object.keys(h).length===0],
