@@ -6,7 +6,7 @@ import { openDatabase,enqueue,savePage } from './database.mjs';
 import { encrypt,decrypt,units,decimal,passwordHash,passwordMatches } from './security.mjs';
 import { createApi } from './api.mjs';
 import { createWorker } from './worker.mjs';
-import { createAdapter,bybitEvent,binanceIncome,okxEvent,normalizedCapital } from './exchanges.mjs';
+import { catalog,createAdapter,bybitEvent,binanceIncome,okxEvent,normalizedCapital } from './exchanges.mjs';
 
 test('AES-GCM authenticates credentials, account identity and ciphertext',()=>{
   const key=randomBytes(32),secret={apiKey:'private-api-key',secret:'sensitive-secret'};
@@ -47,6 +47,18 @@ test('read-only verification rejects write permission and does not follow redire
   let called;
   const adapter=createAdapter('Bybit',{apiKey:'abc',secret:'def'},{},async(url,init)=>{called={url,init};return new Response(JSON.stringify({retCode:0,result:{readOnly:0}}));});
   await assert.rejects(adapter.verify(),/только для чтения/);assert.equal(called.init.method,'GET');assert.equal(called.init.redirect,'error');assert(called.init.headers['X-BAPI-SIGN']);assert(!called.url.includes('def'));
+});
+test('all requested exchange adapters are enabled and sign read requests',async()=>{
+  const expected=['Gate.io','Bitget','Aster','KuCoin','MEXC','Lighter'];assert(expected.every(id=>catalog.find(v=>v.id===id)?.enabled));
+  const cases=[
+    ['Gate.io',{apiKey:'key123',secret:'secret123'},{},[],h=>h.KEY&&h.SIGN],
+    ['Bitget',{apiKey:'key123',secret:'secret123',passphrase:'pass'},{},{code:'00000',data:[]},h=>h['ACCESS-SIGN']&&h['ACCESS-PASSPHRASE']],
+    ['Aster',{apiKey:'key123',secret:'secret123'},{},[],h=>h['X-MBX-APIKEY']],
+    ['KuCoin',{apiKey:'key123',secret:'secret123',passphrase:'pass'},{},{code:'200000',data:{permission:'General'}},h=>h['KC-API-SIGN']&&h['KC-API-PASSPHRASE']],
+    ['MEXC',{apiKey:'key123',secret:'secret123'},{futures:false},{balances:[]},h=>h['X-MBX-APIKEY']],
+    ['Lighter',{address:'0x1111111111111111111111111111111111111111'},{},{accounts:[{}]},h=>Object.keys(h).length===0],
+  ];
+  for(const [name,credentials,options,response,headersOk] of cases){let called;const adapter=createAdapter(name,credentials,options,async(url,init)=>{called={url,init};return new Response(JSON.stringify(response));});await adapter.verify();assert(headersOk(called.init.headers),`${name} auth headers`);assert(called.init.redirect==='error');}
 });
 test('worker persists pages, resumes after restart and marks snapshot completion',async()=>{
   const db=openDatabase(':memory:'),key=randomBytes(32),id=addConnection(db,key);enqueue(db,id);let calls=0;
