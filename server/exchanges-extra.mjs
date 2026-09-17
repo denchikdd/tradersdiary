@@ -44,7 +44,9 @@ export function createExtraAdapter(exchange,credentials,options={},fetchImpl=fet
     const query=new URLSearchParams(Object.entries(signedParams).filter(([,v])=>v!==undefined).map(([k,v])=>[k,String(v)])).toString();
     const signature=await wallet.signTypedData({name:'AsterSignTransaction',version:'1',chainId:1666,verifyingContract:'0x0000000000000000000000000000000000000000'},{Message:[{name:'msg',type:'string'}]},{msg:query});
     let response;try{response=await fetchImpl(`${host}${path}?${query}&signature=${encodeURIComponent(signature)}`,{method:'GET',headers:{Accept:'application/json'},redirect:'error',signal:AbortSignal.timeout(20000)});}catch{throw new ExchangeError('Aster недоступен или истекло время ожидания.',true);}
-    const body=await parse(response);if(body?.code!==undefined&&Number(body.code)!==0)throw new ExchangeError(body.msg||`Ошибка Aster ${body.code}.`);return body?.data??body;
+    let body;try{body=JSON.parse(await response.text());}catch{throw new ExchangeError(`Aster вернул некорректный ответ (HTTP ${response.status}).`,response.status>=500);}
+    if(!response.ok||body?.code!==undefined&&Number(body.code)!==0){const detail=typeof body?.msg==='string'?body.msg:typeof body?.message==='string'?body.message:'';throw new ExchangeError(`Aster отклонил запрос${body?.code!==undefined?` (${body.code})`:''}${detail?`: ${detail}`:` (HTTP ${response.status})`}.`,response.status===429||response.status>=500);}
+    return body?.data??body;
   }
   async function verify(){
     if(exchange==='Aster'){if(!credentials.apiKey||!credentials.secret)throw new ExchangeError('Укажите адрес и приватный ключ read-only API Wallet Aster.');await asterPrivate('/fapi/v3/account');return;}
