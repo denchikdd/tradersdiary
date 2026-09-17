@@ -21,6 +21,8 @@ test('exact decimals, negative funding and rebates',()=>{
   assert.equal(bybitEvent({type:'TRANSFER_IN',cashFlow:'10000'},'ledger','futures').kind,'transfer');
   assert.equal(binanceIncome({incomeType:'COMMISSION',income:'-0.02',tranId:'1',time:10}).fee,'0.020000000000');
   const ok=okxEvent({billId:'1',type:'8',subType:'173',pnl:'2',fee:'0',ts:'10'},'bills','futures');assert.equal(ok.funding,'2');assert.equal(ok.gross,'0');
+  assert.equal(decimal(units('-0.80284444444416')),'-0.802844444444');
+  assert.equal(decimal(units('9.9999999999999')),'10.000000000000');
   assert.throws(()=>units('NaN'));assert.throws(()=>units('1e10'));
 });
 test('password hashing and verification',()=>{const hash=passwordHash('long-private-password');assert(passwordMatches('long-private-password',hash));assert(!passwordMatches('wrong-password',hash));});
