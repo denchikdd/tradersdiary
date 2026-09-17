@@ -89,8 +89,8 @@ export function createApi(db,key,{origin,secure,setupToken,adapterFactory=create
         return send(res,200,{ok:true});
       }
       if(method==='GET'&&path==='/journal') {
-        const from=Date.parse(url.searchParams.get('from')),to=Date.parse(url.searchParams.get('to'));
-        if(!Number.isFinite(from)||!Number.isFinite(to)||to<from||to-from>370*86400000)throw new ApiError(400,'Период не должен превышать год.');
+        const allTime=url.searchParams.get('scope')==='all',from=allTime?0:Date.parse(url.searchParams.get('from')),to=allTime?Date.now():Date.parse(url.searchParams.get('to'));
+        if(!Number.isFinite(from)||!Number.isFinite(to)||to<from||(!allTime&&to-from>370*86400000))throw new ApiError(400,'Период не должен превышать год.');
         const events=db.prepare(`SELECT e.*,c.exchange,c.label FROM events e JOIN connections c ON c.id=e.connection_id WHERE time>=? AND time<? AND kind='pnl' ORDER BY time`).all(from,to+86400000);
         const groups=new Map();let unvalued=0;
         for(const e of events) {
@@ -121,5 +121,4 @@ export function createApi(db,key,{origin,secure,setupToken,adapterFactory=create
     }
   };
 }
-
 
