@@ -12,6 +12,12 @@ Node.js 24, встроенный node:sqlite, SQLite WAL на постоянно
 | Binance | income USDⓈ-M, spot fills | income 3 месяца (берём 89 дней с запасом); spot требует полный список пар. Futures fills отдельно пока не загружаются |
 | OKX | fills SPOT/SWAP, bills SWAP | 3 месяца (89 дней с запасом), billId |
 | Hyperliquid | perpetual fills/funding | API ограничивает fills последними 10 000, spot-PnL не рассчитывается |
+| Gate.io | spot fills, USDT futures account book (PnL/fees/funding) | импорт окнами; полнота зависит от retention API аккаунта |
+| Bitget | USDT/USDC futures account bills, spot/futures balance | 89 дней; отдельный Read-Only ключ и passphrase |
+| Aster | perpetual income: realized PnL/commission/funding | 89 дней, 7-дневные окна; HMAC API Aster Pro |
+| KuCoin | USDT futures ledger, spot/futures balance | однодневные окна; ключ только с General/read, без transfer/withdrawal |
+| MEXC | spot fills и futures deals перечисленных пар | spot — только последний месяц; futures — до 90 дней на окно |
+| Lighter | текущий публичный баланс аккаунта | приватная история пока не импортируется: официальный signer требует отдельный API private key и account index |
 
 «Доступная история загружена» — завершены запросы в допустимом окне API, а не восстановлена вся история аккаунта. Пустой ответ не доказывает отсутствие старых сделок. Старые данные потребуют архива биржи; CSV/ZIP-импорт пока не реализован. Classic Bybit и региональные API-домены не поддерживаются.
 
@@ -25,7 +31,7 @@ Spot fills сохраняются, но без себестоимости нач
 Календарь группирует записи по дате, подключению, символу и валюте; их количество не равно числу закрытых сделок. «История» показывает отдельные fills, если адаптер их получает. CSV dashboard содержит записи PnL, не оригинальные fills.
 
 ## Следующие этапы
-Сверка реальных ключей с отчётами, региональные API, Gate/Bitget/Aster, Binance futures fills, CSV-архивы, spot cost basis/FIFO, капитал, процентная доходность, исторические balances, отдельные deposits/withdrawals, orders, WebSocket. Последний snapshot не заменяет историю капитала.
+Сверка каждого нового адаптера на реальном read-only ключе с отчётом биржи, Lighter signer, Binance futures fills, Bitget spot fills, CSV-архивы, spot cost basis/FIFO, процентная доходность, исторические balances, отдельные deposits/withdrawals, orders, WebSocket. Последний snapshot не заменяет историю капитала.
 
 ## Документация API
 - https://bybit-exchange.github.io/docs/v5/user/apikey-info
@@ -35,3 +41,11 @@ Spot fills сохраняются, но без себестоимости нач
 - https://developers.binance.com/docs/wallet/account/api-key-permission
 - https://www.okx.com/docs-v5/en/
 - https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint
+- https://www.gate.com/docs/developers/apiv4/en/
+- https://www.bitget.com/api-doc/common/signature
+- https://github.com/asterdex/api-docs
+- https://www.kucoin.com/docs-new
+- https://mexcdevelop.github.io/apidocs/spot_v3_en/
+- https://mexcdevelop.github.io/apidocs/contract_v1_en/
+- https://github.com/elliottech/lighter-python
+
