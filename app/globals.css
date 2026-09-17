@@ -15,6 +15,10 @@
 @media(max-width:720px){.desktop-value{display:none}.mobile-value{display:inline}.calendar-day strong{white-space:nowrap;overflow-wrap:normal;font-size:12px}}
 @media(max-width:720px){.page-heading{flex-wrap:wrap}.heading-actions{width:100%;align-items:stretch}.capital-card{min-width:0;flex:1}.heading-actions>.connect-button{align-self:stretch}.capital-card strong{font-size:16px}}
 @media(max-width:720px){.account-analytics{margin-bottom:16px}.analytics-head{align-items:flex-start;gap:12px;flex-direction:column}.period-switch{width:100%}.period-switch button{flex:1;padding:7px 5px}.metric-strip{grid-template-columns:repeat(2,1fr)}.metric-strip>div{border-bottom:1px solid #2b3037}.metric-strip>div:last-child{grid-column:1/-1}.accounts-table-wrap{overflow-x:auto;padding:6px 10px 12px}.accounts-table{min-width:620px}.metric-strip strong{font-size:16px}}
+
+/* Calendar/history comes before account statistics. Keep the swapped cards separated. */
+.account-analytics{margin-top:22px}
+@media(max-width:720px){.account-analytics{margin-top:16px}}
 .danger-button{color:#e5939a;border-color:#624047}.month-total{margin:14px 0 4px auto;width:min(360px,100%);display:flex;align-items:center;gap:16px;border:1px solid #3b4249;background:#1c2025;border-radius:7px;padding:13px 15px;text-align:left}.month-total span{color:#aeb5bd;font-size:13px}.month-total strong{margin-left:auto;font-size:17px;font-weight:500}.month-total small{color:#78828d;font-size:12px}.month-total svg{color:#65707a;flex-shrink:0}
 @media(max-width:720px){.month-total{width:100%;margin-top:8px}.month-total small{display:none}}
 @media(prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
