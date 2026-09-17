@@ -75,10 +75,11 @@ export function createApi(db,key,{origin,secure,setupToken,adapterFactory=create
         db.prepare('INSERT INTO connections(id,exchange,label,secret,fingerprint,start,options,created) VALUES(?,?,?,?,?,?,?,?)').run(id,exchange,label,encrypt(credentials,key,id),fingerprint,start,JSON.stringify(options),Date.now());
         enqueue(db,id);return send(res,201,{id});
       }
-      const action=path.match(/^\/connections\/([a-f0-9-]{36})\/(sync|pause|resume)$/);
+      const action=path.match(/^\/connections\/([a-f0-9-]{36})\/(sync|pause|resume|delete)$/);
       if(method==='POST'&&action) {
         const [,id,verb]=action,c=db.prepare('SELECT * FROM connections WHERE id=?').get(id);if(!c)throw new ApiError(404,'Подключение не найдено.');
-        if(verb==='pause') {db.prepare('UPDATE connections SET disabled=1 WHERE id=?').run(id);db.prepare("UPDATE jobs SET status='cancelled' WHERE connection_id=? AND status='queued'").run(id);}
+        if(verb==='delete') {db.exec('BEGIN IMMEDIATE');try{db.prepare('DELETE FROM events WHERE connection_id=?').run(id);db.prepare('DELETE FROM snapshots WHERE connection_id=?').run(id);db.prepare('DELETE FROM jobs WHERE connection_id=?').run(id);db.prepare('DELETE FROM connections WHERE id=?').run(id);db.exec('COMMIT');}catch(e){db.exec('ROLLBACK');throw e;}}
+        else if(verb==='pause') {db.prepare('UPDATE connections SET disabled=1 WHERE id=?').run(id);db.prepare("UPDATE jobs SET status='cancelled' WHERE connection_id=? AND status='queued'").run(id);}
         else {
           db.prepare("UPDATE connections SET disabled=0,status='queued',error=NULL WHERE id=?").run(id);
           const failed=db.prepare("SELECT id FROM jobs WHERE connection_id=? AND status='failed' ORDER BY id DESC LIMIT 1").get(id);
