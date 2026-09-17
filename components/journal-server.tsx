@@ -54,10 +54,10 @@ export function Connections({onChange}:{onChange:()=>void}) {
     <label>Начало истории<input name="start" type="date" min="2017-01-01" max={new Date().toISOString().slice(0,10)} defaultValue="2024-01-01" required/></label>
     {exchange==='Binance'&&<><label className="check-label"><input name="futures" type="checkbox" defaultChecked/>USDⓈ-M фьючерсы</label><label>Все торговавшиеся пары spot<input name="spotSymbols" placeholder="BTCUSDT, ETHUSDT, SOLUSDC"/><small>Без списка пар Binance не позволяет найти всю историю spot.</small></label></>}
     {exchange==='MEXC'&&<><label className="check-label"><input name="futures" type="checkbox" defaultChecked/>USDT/USDC фьючерсы</label><label>Все торговавшиеся пары<input name="spotSymbols" placeholder="BTCUSDT, ETHUSDT, SOLUSDC" required/><small>Пары используются для spot и futures; spot API отдаёт историю только за последний месяц.</small></label></>}
-    <label className="check-label"><input type="checkbox" required/>Ключ только для чтения, без торговли, переводов и вывода.</label>
+    <label className="check-label"><input type="checkbox" required/>{selected?.address?'Я указал только публичный адрес, без seed-фразы и приватного ключа.':'Ключ только для чтения, без торговли, переводов и вывода.'}</label>
     <button className="connect-button" disabled={busy||!selected?.enabled}>{busy?'Проверяем доступ…':'Подключить и загрузить историю'}</button>
     {error&&<p role="alert" className="server-error">{error}</p>}
-    <small>Секрет отправляется только вашему серверу, хранится зашифрованным и не возвращается в браузер. Синхронизация продолжается после закрытия страницы.</small>
+    <small>{selected?.address?'Публичный адрес не даёт доступа к средствам. Синхронизация продолжается после закрытия страницы.':'Секрет отправляется только вашему серверу, хранится зашифрованным и не возвращается в браузер. Синхронизация продолжается после закрытия страницы.'}</small>
     </form></div>;
 }
 export function RealHistory({from,to,exchange,market}:{from:string;to:string;exchange:string;market:string}) {
