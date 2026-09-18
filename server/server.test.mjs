@@ -160,6 +160,12 @@ test('HTTP auth, CSRF, encrypted storage, no returned credentials, logout, dedup
     savePage(db,id,'ledger',[e,{...e,id:'deposit',kind:'transfer',gross:'10000'}],1,{});
     const result=await (await call('/journal?from=2026-09-01&to=2026-09-30')).json();assert.equal(result.rows.length,1);assert.equal(result.rows[0].gross-result.rows[0].fee+result.rows[0].funding,9900);
     const allTime=await call('/journal?scope=all');assert.equal(allTime.status,200);assert.equal((await allTime.json()).rows.length,1);
+    const emptyNote=await (await call('/notes/2026-09-16')).json();assert.equal(emptyNote.note,'');assert.deepEqual(emptyNote.images,[]);
+    assert.equal((await call('/notes/2026-09-16',{note:'Хороший день https://example.com/review'})).status,200);
+    const uploaded=await call('/notes/2026-09-16/images',{name:'chart.png',mime:'image/png',data:Buffer.from('image-bytes').toString('base64')});assert.equal(uploaded.status,201);const image=await uploaded.json();
+    const savedNote=await (await call('/notes/2026-09-16')).json();assert.match(savedNote.note,/example\.com/);assert.equal(savedNote.images.length,1);assert.equal(savedNote.images[0].name,'chart.png');
+    const servedImage=await call(`/notes/2026-09-16/images/${image.id}`);assert.equal(servedImage.status,200);assert.equal(servedImage.headers.get('content-type'),'image/png');assert.equal(await servedImage.text(),'image-bytes');
+    assert.equal((await call(`/notes/2026-09-16/images/${image.id}/delete`,{})).status,200);assert.equal((await (await call('/notes/2026-09-16')).json()).images.length,0);
     await call('/logout',{});assert.equal((await call('/connections')).status,401);
     for(let i=0;i<12;i++)await call('/login',{password:'wrong-password-long'});
     assert.equal((await call('/login',{password:'test-owner-password'})).status,429);
