@@ -32,7 +32,7 @@
 
 /* Mobile day details: full-screen sheet with contained, touch-friendly content. */
 .table-scroll{width:100%;max-width:100%;overflow-x:auto;overscroll-behavior-x:contain;-webkit-overflow-scrolling:touch}.table-scroll table{min-width:650px}
-@media(max-width:720px){
+@media(max-width:900px), (hover:none) and (pointer:coarse){
   [data-slot=dialog-overlay]{background:#07090cdd!important;backdrop-filter:blur(3px)}
   .detail-dialog{position:fixed!important;inset:0!important;top:0!important;right:0!important;bottom:0!important;left:0!important;transform:none!important;margin:0!important;width:100vw!important;min-width:0!important;max-width:none!important;height:100dvh!important;max-height:none!important;border:0!important;border-radius:0!important;padding:max(14px,env(safe-area-inset-top)) 14px max(22px,env(safe-area-inset-bottom))!important;gap:16px!important;overflow-y:auto!important;overflow-x:hidden!important;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;box-shadow:none!important}
   .detail-dialog>*{min-width:0!important;max-width:100%!important}
@@ -82,3 +82,7 @@
   .day-note-tools>span{line-height:1.4}
 }
 
+
+/* Runtime fallback for iOS Safari and installed web apps with a stale or zoomed layout viewport. */
+.detail-dialog-mobile{position:fixed!important;inset:0!important;top:0!important;right:0!important;bottom:0!important;left:0!important;transform:none!important;margin:0!important;width:100vw!important;min-width:0!important;max-width:none!important;height:100dvh!important;max-height:none!important;border:0!important;border-radius:0!important;overflow-x:hidden!important;overflow-y:auto!important;display:flex!important;flex-direction:column!important}
+@supports (-webkit-touch-callout:none){input,textarea,select{font-size:16px!important}.detail-dialog-mobile{width:100%!important}}
