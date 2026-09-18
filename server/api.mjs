@@ -12,13 +12,14 @@ export function createApi(db,key,{origin,secure,setupToken,adapterFactory=create
     return token?db.prepare('SELECT hash FROM sessions WHERE hash=? AND expires>?').get(digest(token),Date.now()):null;
   };
   const send=(res,status,data)=>{res.writeHead(status,{'Content-Type':'application/json; charset=utf-8'});res.end(JSON.stringify(data));};
-  async function body(req) {
+  async function body(req,maxBytes=16384) {
     if(!String(req.headers['content-type']).startsWith('application/json'))throw new ApiError(415,'Нужен JSON.');
     let value='',bytes=0;
-    for await(const chunk of req){bytes+=chunk.length;if(bytes>16384)throw new ApiError(413,'Слишком большой запрос.');value+=chunk;}
+    for await(const chunk of req){bytes+=chunk.length;if(bytes>maxBytes)throw new ApiError(413,'Слишком большой запрос.');value+=chunk;}
     try{return JSON.parse(value);}catch{throw new ApiError(400,'Некорректный JSON.');}
   }
   function text(v,min=1,max=512) {if(typeof v!=='string'||v.length<min||v.length>max)throw new ApiError(400,'Проверьте заполнение полей.');return v;}
+  function noteDate(v) {if(!/^\d{4}-\d{2}-\d{2}$/.test(v||'')||new Date(v+'T00:00:00.000Z').toISOString().slice(0,10)!==v)throw new ApiError(400,'Некорректная дата заметки.');return v;}
   function rateLimit() {
     // Global persisted limiter, independent of attacker-controlled forwarded IP headers.
     const old=db.prepare("SELECT * FROM login_attempts WHERE bucket='owner'").get();
@@ -48,6 +49,46 @@ export function createApi(db,key,{origin,secure,setupToken,adapterFactory=create
       }
       const session=sessionFor(req);if(!session)throw new ApiError(401,'Введите пароль журнала.');
       if(method==='POST'&&path==='/logout'){db.prepare('DELETE FROM sessions WHERE hash=?').run(session.hash);res.setHeader('Set-Cookie',cookie('',0));return send(res,200,{ok:true});}
+      const note=path.match(/^\/notes\/(\d{4}-\d{2}-\d{2})$/);
+      if(note&&method==='GET') {
+        const date=noteDate(note[1]),row=db.prepare('SELECT note,updated FROM day_notes WHERE date=?').get(date);
+        const images=db.prepare('SELECT id,name,mime,size,created FROM note_images WHERE date=? ORDER BY created,id').all(date);
+        return send(res,200,{date,note:row?.note||'',updatedAt:row?.updated||null,images});
+      }
+      if(note&&method==='POST') {
+        const date=noteDate(note[1]),input=await body(req,32768),value=typeof input.note==='string'?input.note:'';
+        if(value.length>20000)throw new ApiError(413,'Заметка не должна превышать 20 000 символов.');
+        db.prepare(`INSERT INTO day_notes(date,note,updated) VALUES(?,?,?)
+          ON CONFLICT(date) DO UPDATE SET note=excluded.note,updated=excluded.updated`).run(date,value,Date.now());
+        return send(res,200,{ok:true,updatedAt:Date.now()});
+      }
+      const noteImages=path.match(/^\/notes\/(\d{4}-\d{2}-\d{2})\/images$/);
+      if(noteImages&&method==='POST') {
+        const date=noteDate(noteImages[1]);
+        if(db.prepare('SELECT count(*) AS n FROM note_images WHERE date=?').get(date).n>=12)throw new ApiError(400,'Для одного дня можно сохранить не больше 12 изображений.');
+        const input=await body(req,7*1024*1024),mime=String(input.mime||''),name=String(input.name||'Скриншот').slice(0,160);
+        if(!['image/png','image/jpeg','image/webp'].includes(mime))throw new ApiError(415,'Поддерживаются PNG, JPEG и WebP.');
+        if(typeof input.data!=='string'||input.data.length%4!==0||!/^[A-Za-z0-9+/]*={0,2}$/.test(input.data))throw new ApiError(400,'Повреждённое изображение.');
+        const data=Buffer.from(input.data,'base64');if(!data.length||data.length>5*1024*1024)throw new ApiError(413,'Размер изображения не должен превышать 5 МБ.');
+        const id=randomUUID(),now=Date.now();
+        db.exec('BEGIN IMMEDIATE');try{
+          db.prepare(`INSERT INTO day_notes(date,note,updated) VALUES(?,'',?) ON CONFLICT(date) DO NOTHING`).run(date,now);
+          db.prepare('INSERT INTO note_images VALUES(?,?,?,?,?,?,?)').run(id,date,name,mime,data.length,data,now);
+          db.exec('COMMIT');
+        }catch(e){db.exec('ROLLBACK');throw e;}
+        return send(res,201,{id,name,mime,size:data.length,created:now});
+      }
+      const noteImage=path.match(/^\/notes\/(\d{4}-\d{2}-\d{2})\/images\/([a-f0-9-]{36})$/);
+      if(noteImage&&method==='GET') {
+        const date=noteDate(noteImage[1]),image=db.prepare('SELECT mime,data FROM note_images WHERE id=? AND date=?').get(noteImage[2],date);
+        if(!image)throw new ApiError(404,'Изображение не найдено.');
+        res.writeHead(200,{'Content-Type':image.mime,'Content-Length':image.data.length,'Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff','Cross-Origin-Resource-Policy':'same-origin'});return res.end(image.data);
+      }
+      const deleteNoteImage=path.match(/^\/notes\/(\d{4}-\d{2}-\d{2})\/images\/([a-f0-9-]{36})\/delete$/);
+      if(deleteNoteImage&&method==='POST') {
+        const date=noteDate(deleteNoteImage[1]),result=db.prepare('DELETE FROM note_images WHERE id=? AND date=?').run(deleteNoteImage[2],date);
+        if(!result.changes)throw new ApiError(404,'Изображение не найдено.');return send(res,200,{ok:true});
+      }
       if(method==='GET'&&path==='/connections') {
         const connections=db.prepare(`SELECT c.id,c.exchange,c.label,c.start,c.status,c.error,c.synced,c.disabled,
           (SELECT count(*) FROM events e WHERE e.connection_id=c.id) AS records,
