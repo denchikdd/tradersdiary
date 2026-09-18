@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useState } from 'react';
-import { ChevronDown, Eye, EyeOff, WalletCards } from 'lucide-react';
+import { Check, ChevronDown, Eye, EyeOff, ImagePlus, Pencil, Save, Trash2, WalletCards } from 'lucide-react';
 import { percentOfCapital, type Trade } from '@/lib/journal';
 
 type Connection={id:string;exchange:string;label:string;start:number;status:string;error:string|null;synced:number|null;records:number;earliest:number|null;disabled:number};
@@ -9,6 +9,23 @@ export async function journalApi<T = {ok:boolean}>(path:string,body?:unknown):Pr
   const res=await fetch('/api/journal'+path,{method:body===undefined?'GET':'POST',credentials:'same-origin',cache:'no-store',headers:body===undefined?{}:{'Content-Type':'application/json','X-Journal-Request':'1'},...(body===undefined?{}:{body:JSON.stringify(body)})});
   if(!res.headers.get('content-type')?.includes('application/json'))throw new Error('Сервер журнала пока недоступен.');
   const data=await res.json() as T & {error?:string};if(!res.ok)throw new Error(data.error||'Ошибка сервера.');return data;
+}
+
+type NoteImage={id:string;name:string;mime:string;size:number;created:number};
+const imageTypes=['image/png','image/jpeg','image/webp'];
+function fileBase64(file:File){return new Promise<string>((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result).split(',')[1]||'');reader.onerror=()=>reject(new Error('Не удалось прочитать изображение.'));reader.readAsDataURL(file);});}
+function LinkedNote({text}:{text:string}){return <div className="day-note-text">{text.split(/(https?:\/\/[^\s]+)/g).map((part,i)=>part.startsWith('http://')||part.startsWith('https://')?<a key={i} href={part} target="_blank" rel="noreferrer">{part}</a>:<span key={i}>{part}</span>)}</div>}
+export function DailyNote({date}:{date:string}){
+  const [note,setNote]=useState(''),[draft,setDraft]=useState(''),[images,setImages]=useState<NoteImage[]>([]),[editing,setEditing]=useState(false),[busy,setBusy]=useState(false),[status,setStatus]=useState(''),[error,setError]=useState('');
+  useEffect(()=>{let active=true;setBusy(true);setError('');journalApi<{note:string;images:NoteImage[]}>(`/notes/${date}`).then(v=>{if(active){setNote(v.note);setDraft(v.note);setImages(v.images);setEditing(!v.note&&!v.images.length);}}).catch(e=>{if(active)setError((e as Error).message)}).finally(()=>{if(active)setBusy(false)});return()=>{active=false}},[date]);
+  async function save(){setBusy(true);setError('');setStatus('');try{await journalApi(`/notes/${date}`,{note:draft});setNote(draft);setEditing(false);setStatus('Сохранено');}catch(e){setError((e as Error).message)}finally{setBusy(false)}}
+  async function upload(files:File[]){if(!files.length)return;setBusy(true);setError('');setStatus('');try{for(const file of files){if(!imageTypes.includes(file.type))throw new Error('Поддерживаются PNG, JPEG и WebP.');if(file.size>5*1024*1024)throw new Error('Размер одного изображения не должен превышать 5 МБ.');const image=await journalApi<NoteImage>(`/notes/${date}/images`,{name:file.name,mime:file.type,data:await fileBase64(file)});setImages(v=>[...v,image]);}setStatus('Изображение добавлено');}catch(e){setError((e as Error).message)}finally{setBusy(false)}}
+  async function remove(id:string){setBusy(true);setError('');try{await journalApi(`/notes/${date}/images/${id}/delete`,{});setImages(v=>v.filter(image=>image.id!==id));setStatus('Изображение удалено');}catch(e){setError((e as Error).message)}finally{setBusy(false)}}
+  return <section className="day-note"><div className="day-note-head"><div><h3>Заметки за день</h3><p>Сохраните выводы, план или ссылку на разбор.</p></div>{!editing&&<button className="day-note-action" onClick={()=>setEditing(true)}><Pencil size={15}/>{note?'Изменить':'Добавить заметку'}</button>}</div>
+    {editing?<div className="day-note-editor"><textarea value={draft} maxLength={20000} autoFocus placeholder="Что произошло сегодня? Вставьте текст, ссылку или скриншот…" onChange={e=>setDraft(e.target.value)} onPaste={e=>{const files=Array.from(e.clipboardData.files).filter(file=>file.type.startsWith('image/'));if(files.length){e.preventDefault();void upload(files)}}}/><div className="day-note-editor-foot"><span>{draft.length.toLocaleString('ru-RU')} / 20 000</span><button className="day-note-save" disabled={busy} onClick={save}><Save size={15}/>{busy?'Сохранение…':'Сохранить'}</button></div></div>:note?<LinkedNote text={note}/>:<button className="day-note-empty" onClick={()=>setEditing(true)}>Добавить запись о торговом дне</button>}
+    {!!images.length&&<div className="day-note-gallery">{images.map(image=><figure key={image.id}><a href={`/api/journal/notes/${date}/images/${image.id}`} target="_blank" rel="noreferrer"><img src={`/api/journal/notes/${date}/images/${image.id}`} alt={image.name}/></a><figcaption title={image.name}><span>{image.name}</span><button aria-label={`Удалить ${image.name}`} disabled={busy} onClick={()=>void remove(image.id)}><Trash2 size={14}/></button></figcaption></figure>)}</div>}
+    <div className="day-note-tools"><label className={busy?'disabled':''}><ImagePlus size={16}/>{busy?'Загрузка…':'Добавить скриншоты'}<input type="file" accept="image/png,image/jpeg,image/webp" multiple disabled={busy} onChange={e=>{void upload(Array.from(e.target.files||[]));e.currentTarget.value=''}}/></label><span>PNG, JPEG или WebP · до 5 МБ</span>{status&&<span className="day-note-status"><Check size={14}/>{status}</span>}</div>{error&&<p role="alert" className="server-error">{error}</p>}
+  </section>;
 }
 export function useServerJournal(from:string,to:string,enabled:boolean) {
   const [rows,setRows]=useState<Trade[]>([]),[notice,setNotice]=useState(''),[error,setError]=useState(''),[revision,setRevision]=useState(0);
