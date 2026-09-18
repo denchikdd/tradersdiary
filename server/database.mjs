@@ -32,6 +32,14 @@ export function openDatabase(path) {
     CREATE TABLE IF NOT EXISTS snapshots (
       connection_id TEXT PRIMARY KEY REFERENCES connections(id), time INTEGER NOT NULL, data TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS day_notes (
+      date TEXT PRIMARY KEY, note TEXT NOT NULL DEFAULT '', updated INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS note_images (
+      id TEXT PRIMARY KEY, date TEXT NOT NULL REFERENCES day_notes(date) ON DELETE CASCADE,
+      name TEXT NOT NULL, mime TEXT NOT NULL, size INTEGER NOT NULL, data BLOB NOT NULL, created INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS note_images_date ON note_images(date,created);
     CREATE TABLE IF NOT EXISTS login_attempts (bucket TEXT PRIMARY KEY, attempts INTEGER NOT NULL, expires INTEGER NOT NULL);
     PRAGMA user_version=1;
   `);
