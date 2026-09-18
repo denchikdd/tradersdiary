@@ -1,7 +1,14 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import "./globals.css";
 
-export const viewport = { width: "device-width", initialScale: 1, viewportFit: "cover", themeColor: "#101216" };
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  maximumScale: 1,
+  userScalable: false,
+  viewportFit: "cover",
+  themeColor: "#101216",
+};
 
 export const metadata: Metadata = {
   title: "Торговый журнал",
@@ -26,3 +33,4 @@ export default function RootLayout({
     </html>
   );
 }
+
