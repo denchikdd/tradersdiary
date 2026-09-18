@@ -55,6 +55,25 @@ test('Bybit history starts inside the rolling two-year boundary',()=>{
   const now=Date.now(),streams=createAdapter('Bybit',{apiKey:'abc',secret:'def'}).streams(now);
   assert(streams.every(stream=>stream.start===now-729*86400000));
 });
+test('Binance discovers spot pairs automatically before loading their history',async()=>{
+  const options={futures:false,spotAuto:true},calls=[];
+  const adapter=createAdapter('Binance',{apiKey:'key123',secret:'secret123'},options,async url=>{
+    calls.push(url);
+    if(url.includes('/exchangeInfo'))return new Response(JSON.stringify({symbols:[
+      {symbol:'ETHUSDT',status:'TRADING',isSpotTradingAllowed:true},
+      {symbol:'OLDUSDT',status:'BREAK',isSpotTradingAllowed:true},
+      {symbol:'BTCUSDT',status:'TRADING',isSpotTradingAllowed:true},
+    ]}));
+    if(url.includes('/myTrades'))return new Response(JSON.stringify(url.includes('BTCUSDT')?[{id:7,time:1000,commissionAsset:'USDT'}]:[]));
+    throw new Error(`Unexpected URL ${url}`);
+  });
+  assert.equal(await adapter.prepare(),true);
+  assert.deepEqual(options.spotCandidates,['BTCUSDT','ETHUSDT']);
+  assert.deepEqual(adapter.streams(2000,{discoverSpot:true}).map(v=>v.id),['spot-scan:BTCUSDT','spot-scan:ETHUSDT']);
+  const page=await adapter.page('spot-scan:BTCUSDT',2000,2000);
+  assert.equal(page.discoveredSymbol,'BTCUSDT');assert.equal(page.events[0].symbol,'BTCUSDT');
+  assert(calls.some(v=>v.includes('limit=1')));
+});
 test('all requested exchange adapters are enabled and sign read requests',async()=>{
   const expected=['Gate.io','Bitget','Aster','KuCoin','MEXC','Lighter'];assert(expected.every(id=>catalog.find(v=>v.id===id)?.enabled));
   const cases=[
@@ -171,3 +190,4 @@ test('HTTP auth, CSRF, encrypted storage, no returned credentials, logout, dedup
     assert.equal((await call('/login',{password:'test-owner-password'})).status,429);
   } finally {await new Promise(r=>server.close(r));db.close();}
 });
+

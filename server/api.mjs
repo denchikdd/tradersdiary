@@ -106,8 +106,7 @@ export function createApi(db,key,{origin,secure,setupToken,adapterFactory=create
         if(provider.address&&!/^0x[a-fA-F0-9]{40}$/.test(credentials.address))throw new ApiError(400,'Нужен публичный адрес 0x…');
         const symbols=(input.spotSymbols||'').toUpperCase().split(/[\s,]+/).filter(Boolean);
         if(symbols.length>100||symbols.some(s=>! /^[A-Z0-9]{4,30}$/.test(s)))throw new ApiError(400,'Пары spot: BTCUSDT, ETHUSDC, без слеша.');
-        const options={spotSymbols:symbols,futures:input.futures!==false};
-        if(exchange==='Binance'&&!options.futures&&!symbols.length)throw new ApiError(400,'Выберите фьючерсы или укажите пары spot.');
+        const options={spotSymbols:symbols,futures:input.futures!==false,...(exchange==='Binance'?{spotAuto:true}:{})};
         if(exchange==='MEXC'&&!symbols.length)throw new ApiError(400,'Укажите торговавшиеся spot-пары MEXC для загрузки истории.');
         const fingerprint=digest(exchange+':'+(credentials.apiKey||credentials.address.toLowerCase()));
         if(db.prepare('SELECT id FROM connections WHERE fingerprint=?').get(fingerprint))throw new ApiError(409,'Этот ключ или адрес уже подключён.');
@@ -162,4 +161,5 @@ export function createApi(db,key,{origin,secure,setupToken,adapterFactory=create
     }
   };
 }
+
 

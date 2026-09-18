@@ -5,7 +5,7 @@ import { createExtraAdapter } from './exchanges-extra.mjs';
 export const DAY = 86400000;
 export const catalog = [
   { id:'Bybit', enabled:true, passphrase:false, notice:'Единый аккаунт UTA: исполнения spot/linear и журнал PnL за последние 2 года. Старый Classic Account не поддерживается.' },
-  { id:'Binance', enabled:true, passphrase:false, notice:'USDⓈ-M: журнал доходов за доступные API 3 месяца; spot — история указанных пар. Пары spot нужно перечислить, включая закрытые позиции.' },
+  { id:'Binance', enabled:true, passphrase:false, notice:'USDⓈ-M: журнал доходов за доступные API 3 месяца. Spot-пары определяются и загружаются автоматически; первичный поиск может занять несколько минут.' },
   { id:'OKX', enabled:true, passphrase:true, notice:'Исполнения и финансовый журнал за последние 3 месяца. Для старой истории потребуется архив биржи.' },
   { id:'Hyperliquid', enabled:true, address:true, notice:'Только публичный адрес кошелька. Баланс берётся из объединённого Portfolio; история perpetuals — из публичного API. Приватный ключ не нужен.' },
   { id:'Gate.io',enabled:true,notice:'Spot и USDT perpetuals. История биржи загружается доступными окнами API.' },
@@ -27,7 +27,7 @@ export function createAdapter(exchange, credentials, options={}, fetchImpl=fetch
     if(!response.ok)return null;try{return JSON.parse(await response.text());}catch{return null;}
   }
   async function request(path, params={}) {
-    await delay(fetchImpl === fetch ? 180 : 0);
+    await delay(fetchImpl === fetch ? (exchange==='Binance'?220:180) : 0);
     let url, init = {method:'GET',redirect:'error',signal:AbortSignal.timeout(20000),headers:{}};
     const query = new URLSearchParams(Object.entries(params).filter(([,v])=>v!==undefined).map(([k,v])=>[k,String(v)])).toString();
     const now=String(Date.now());
@@ -75,6 +75,21 @@ export function createAdapter(exchange, credentials, options={}, fetchImpl=fetch
       if(!v || v.perm!=='read_only') throw new ExchangeError('Нужен ключ OKX только с разрешением Read.');
     } else await request('clearinghouseState');
   }
+  async function prepare() {
+    if(exchange!=='Binance')return false;
+    let changed=false;
+    if(options.spotAuto!==true){options.spotAuto=true;changed=true;}
+    if(!Array.isArray(options.spotSymbols)){options.spotSymbols=[];changed=true;}
+    if(!Array.isArray(options.spotCandidates)||!options.spotCandidates.length) {
+      const info=await publicJson('https://api.binance.com/api/v3/exchangeInfo');
+      if(!Array.isArray(info?.symbols))throw new ExchangeError('Binance не отдал каталог spot-пар. Повторим автоматически.',true);
+      options.spotCandidates=[...new Set(info.symbols
+        .filter(v=>v?.symbol&&v.status==='TRADING'&&v.isSpotTradingAllowed!==false)
+        .map(v=>String(v.symbol).toUpperCase()))].sort();
+      changed=true;
+    }
+    return changed;
+  }
   async function snapshot() {
     if(exchange==='Bybit') return {wallet:await request('/v5/account/wallet-balance',{accountType:'UNIFIED'})};
     if(exchange==='OKX') return {wallet:await request('/api/v5/account/balance'),positions:await request('/api/v5/account/positions')};
@@ -97,12 +112,13 @@ export function createAdapter(exchange, credentials, options={}, fetchImpl=fetch
     }
     return result;
   }
-  function streams(now) {
+  function streams(now,state={}) {
     // Keep a one-day cushion: Bybit rejects the exact rolling two-year boundary
     // when its server clock advances between creating the stream and the request.
     if(exchange==='Bybit') return ['fills:spot','fills:linear','ledger:linear'].map(id=>({id,start:now-729*DAY,window:7*DAY}));
     if(exchange==='Binance') return [
       ...(options.futures!==false?[{id:'income',start:now-89*DAY,window:7*DAY}]:[]),
+      ...(state.discoverSpot?(options.spotCandidates||[]).map(symbol=>({id:'spot-scan:'+symbol,start:now,window:1})):[]),
       ...(options.spotSymbols||[]).map(symbol=>({id:'spot:'+symbol,start:Date.UTC(2017,6,1),window:DAY})),
     ];
     if(exchange==='OKX') return ['fills:SPOT','fills:SWAP','bills:SWAP'].map(id=>({id,start:now-89*DAY,window:7*DAY}));
@@ -122,7 +138,11 @@ export function createAdapter(exchange, credentials, options={}, fetchImpl=fetch
         next=rows.length===1000?String(Number(cursor||1)+1):null;
         return {events:rows.map(binanceIncome),next};
       }
-      const symbol=stream.slice(5);
+      const scan=stream.startsWith('spot-scan:'),symbol=stream.slice(scan?10:5);
+      if(scan) {
+        rows=await request('/api/v3/myTrades',{symbol,limit:1});
+        return {events:rows.map(v=>({id:String(v.id),time:v.time,kind:'fill',market:'spot',symbol,currency:v.commissionAsset,gross:'0',fee:'0',funding:'0',raw:v})),next:null,discoveredSymbol:rows.length?symbol:null};
+      }
       rows=await request('/api/v3/myTrades',{symbol,...(cursor?{fromId:cursor}:{startTime:start,endTime:end}),limit:1000});
       const filtered=rows.filter(v=>v.time<=end&&v.time>=start);
       next=rows.length===1000 && rows[rows.length-1].time<=end?String(BigInt(rows[rows.length-1].id)+1n):null;
@@ -144,7 +164,7 @@ export function createAdapter(exchange, credentials, options={}, fetchImpl=fetch
     }
     return {events:rows.map(v=>hyperliquidEvent(v,stream)),next:next||null};
   }
-  return {verify,snapshot,streams,page};
+  return {verify,prepare,snapshot,streams,page,options};
 }
 
 export function normalizedCapital(exchange,data) {
@@ -192,3 +212,4 @@ export function hyperliquidEvent(v,type) {
   const funding=type==='funding', spot=!funding&&String(v.coin).startsWith('@');
   return {id:funding?`${v.hash}:${v.delta.coin}`:String(v.tid),time:Number(v.time),kind:spot?'fill':'pnl',market:spot?'spot':'futures',symbol:funding?v.delta.coin:v.coin,currency:funding?'USDC':v.feeToken||'USDC',gross:funding?'0':v.closedPnl||'0',fee:funding?'0':v.fee||'0',funding:funding?v.delta.usdc||'0':'0',raw:v};
 }
+

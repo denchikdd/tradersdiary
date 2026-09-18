@@ -18,12 +18,19 @@ export function createWorker(db,key,adapterFactory=createAdapter) {
       if(!c) {db.prepare("UPDATE jobs SET status='cancelled' WHERE id=?").run(job.id);return;}
       db.prepare("UPDATE jobs SET status='running',updated=? WHERE id=?").run(Date.now(),job.id);
       db.prepare("UPDATE connections SET status='syncing',error=NULL WHERE id=?").run(c.id);
-      const adapter=adapterFactory(c.exchange,decrypt(c.secret,key,c.id),JSON.parse(c.options));
+      const options=JSON.parse(c.options),adapter=adapterFactory(c.exchange,decrypt(c.secret,key,c.id),options);
+      if(adapter.prepare && await adapter.prepare()) db.prepare('UPDATE connections SET options=? WHERE id=?').run(JSON.stringify(options),c.id);
       const state=JSON.parse(job.checkpoint);
-      if(!state.end) {state.end=Date.now();state.stream=0;state.effectiveStart=c.synced?Math.max(c.start,c.synced-2*DAY):c.start;}
-      const streams=adapter.streams(state.end);
+      if(!state.end) {
+        state.end=Date.now();state.stream=0;state.effectiveStart=c.synced?Math.max(c.start,c.synced-2*DAY):c.start;
+        state.discoverSpot=c.exchange==='Binance'&&options.spotAuto===true&&(!options.spotDiscoveryAt||Date.now()-options.spotDiscoveryAt>7*DAY);
+      } else if(c.exchange==='Binance'&&options.spotAuto===true&&state.discoverSpot===undefined&&!options.spotDiscoveryAt) {
+        state.discoverSpot=true;state.stream=0;delete state.start;delete state.cursor;
+      }
+      const streams=adapter.streams(state.end,state);
       if(state.stream>=streams.length) {
         const snapshot=await adapter.snapshot();
+        if(state.discoverSpot){options.spotDiscoveryAt=Date.now();db.prepare('UPDATE connections SET options=? WHERE id=?').run(JSON.stringify(options),c.id);}
         db.prepare('INSERT INTO snapshots VALUES(?,?,?) ON CONFLICT(connection_id) DO UPDATE SET time=excluded.time,data=excluded.data').run(c.id,Date.now(),JSON.stringify(snapshot));
         db.prepare("UPDATE connections SET status='ready',synced=?,error=NULL WHERE id=?").run(state.end,c.id);
         db.prepare("UPDATE jobs SET status='done',updated=? WHERE id=?").run(Date.now(),job.id);
@@ -35,8 +42,14 @@ export function createWorker(db,key,adapterFactory=createAdapter) {
       if(start>state.end) {state.stream++;delete state.start;delete state.cursor;savePage(db,c.id,stream.id,[],job.id,state);}
       else {
         const page=await adapter.page(stream.id,start,end,state.cursor);
+        if(page.discoveredSymbol&&!options.spotSymbols.includes(page.discoveredSymbol)) {
+          options.spotSymbols.push(page.discoveredSymbol);options.spotSymbols.sort();
+          db.prepare('UPDATE connections SET options=? WHERE id=?').run(JSON.stringify(options),c.id);
+        }
         if(page.next && page.next===state.cursor) throw new Error('Биржа повторила курсор. Синхронизация остановлена без потери данных.');
-        if(page.next) {state.start=start;state.cursor=page.next;} else {state.start=end+1;delete state.cursor;}
+        if(page.next) {state.start=start;state.cursor=page.next;}
+        else if(end>=state.end) {state.stream++;delete state.start;delete state.cursor;}
+        else {state.start=end+1;delete state.cursor;}
         savePage(db,c.id,stream.id,page.events,job.id,state);
       }
       db.prepare("UPDATE jobs SET status='queued',attempts=0 WHERE id=?").run(job.id);
@@ -51,3 +64,4 @@ export function createWorker(db,key,adapterFactory=createAdapter) {
   }
   return {tick,start(){timer=setInterval(()=>void tick(),500);timer.unref();void tick();},async stop(){stopped=true;clearInterval(timer);while(busy)await new Promise(r=>setTimeout(r,50));}};
 }
+
