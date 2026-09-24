@@ -1,7 +1,7 @@
 import { createServer } from 'node:http';
 import { randomBytes } from 'node:crypto';
-import { existsSync,readFileSync,writeFileSync,mkdirSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { createReadStream,existsSync,readFileSync,writeFileSync,mkdirSync,statSync } from 'node:fs';
+import { extname,resolve,sep } from 'node:path';
 import { openDatabase } from './database.mjs';
 import { readKey, encrypt, decrypt } from './security.mjs';
 import { createApi } from './api.mjs';
@@ -32,8 +32,23 @@ if(production) {
   const {default:next}=await import('next');const app=next({dev:false});await app.prepare();web=app.getRequestHandler();
 }
 const worker=createWorker(db,key);
+const staticRoot=resolve('.next/static');
+const staticTypes={'.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.json':'application/json; charset=utf-8','.svg':'image/svg+xml','.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.webp':'image/webp','.woff':'font/woff','.woff2':'font/woff2'};
+function serveStatic(req,res) {
+  if(!production||!['GET','HEAD'].includes(req.method||''))return false;
+  let pathname;
+  try {pathname=decodeURIComponent(new URL(req.url||'/','http://localhost').pathname);} catch {return false;}
+  if(!pathname.startsWith('/_next/static/'))return false;
+  const file=resolve(staticRoot,pathname.slice('/_next/static/'.length));
+  if(file!==staticRoot&&!file.startsWith(staticRoot+sep)){res.writeHead(400);res.end();return true;}
+  try {if(!statSync(file).isFile())throw new Error('not a file');} catch {res.writeHead(404);res.end();return true;}
+  res.writeHead(200,{'Content-Type':staticTypes[extname(file).toLowerCase()]||'application/octet-stream','Cache-Control':'no-cache, no-store, must-revalidate','X-Content-Type-Options':'nosniff'});
+  if(req.method==='HEAD')res.end();else createReadStream(file).pipe(res);
+  return true;
+}
 const server=createServer(async(req,res)=>{
   if(req.url?.startsWith('/api/journal/'))return handle(req,res);
+  if(serveStatic(req,res))return;
   if(web)return web(req,res);
   res.writeHead(404);res.end();
 });
@@ -41,3 +56,4 @@ server.requestTimeout=30000;server.headersTimeout=15000;
 server.listen(Number(process.env.PORT||5174),production?'0.0.0.0':'127.0.0.1',()=>{console.log('Journal server ready. Credentials and financial data are never logged.');worker.start();});
 async function stop(){server.close();await worker.stop();db.close();process.exit(0);}
 process.on('SIGTERM',stop);process.on('SIGINT',stop);
+
