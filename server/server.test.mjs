@@ -5,7 +5,7 @@ import { createServer } from 'node:http';
 import { openDatabase,enqueue,savePage } from './database.mjs';
 import { encrypt,decrypt,units,decimal,passwordHash,passwordMatches } from './security.mjs';
 import { createApi } from './api.mjs';
-import { createWorker } from './worker.mjs';
+import { createWorker, SYNC_INTERVAL } from './worker.mjs';
 import { catalog,createAdapter,bybitEvent,binanceIncome,okxEvent,normalizedCapital } from './exchanges.mjs';
 
 test('AES-GCM authenticates credentials, account identity and ciphertext',()=>{
@@ -158,6 +158,19 @@ test('worker persists pages, resumes after restart and marks snapshot completion
   const worker=createWorker(db,key,factory);await worker.tick();await worker.stop();
   const restarted=createWorker(db,key,factory);await restarted.tick();await restarted.tick();assert.equal(calls,1);assert.equal(db.prepare('SELECT status FROM connections').get().status,'ready');await restarted.stop();db.close();
 });
+test('worker refreshes after five minutes and rotates long imports between exchanges',async()=>{
+  assert.equal(SYNC_INTERVAL,5*60*1000);
+  const db=openDatabase(':memory:'),key=randomBytes(32),first=addConnection(db,key),second='22222222-2222-4222-8222-222222222222';
+  db.prepare('INSERT INTO connections(id,exchange,label,secret,fingerprint,start,options,created) VALUES(?,?,?,?,?,?,?,?)').run(second,'OKX','Second',encrypt({apiKey:'key-2',secret:'secret-2',passphrase:'pass'},key,second),'fingerprint-2',Date.now()-10000,'{}',Date.now());
+  enqueue(db,first);enqueue(db,second);
+  db.prepare('UPDATE jobs SET updated=CASE connection_id WHEN ? THEN 1 ELSE 2 END').run(first);
+  const pages=[];
+  const factory=exchange=>({streams:()=>[{id:'ledger',start:0,window:1}],page:async()=>{pages.push(exchange);return {events:[],next:null};},snapshot:async()=>({wallet:[]})});
+  const worker=createWorker(db,key,factory);await worker.tick();await worker.tick();
+  assert.deepEqual(pages,['Bybit','OKX']);
+  assert.equal(db.prepare('SELECT count(*) AS n FROM snapshots').get().n,2);
+  await worker.stop();db.close();
+});
 test('HTTP auth, CSRF, encrypted storage, no returned credentials, logout, dedup and USD totals',async()=>{
   const db=openDatabase(':memory:'),key=randomBytes(32),setupToken='setup-token-long-enough-for-tests';
   const server=createServer();await new Promise(r=>server.listen(0,'127.0.0.1',r));const origin=`http://127.0.0.1:${server.address().port}`;
@@ -190,4 +203,5 @@ test('HTTP auth, CSRF, encrypted storage, no returned credentials, logout, dedup
     assert.equal((await call('/login',{password:'test-owner-password'})).status,429);
   } finally {await new Promise(r=>server.close(r));db.close();}
 });
+
 
