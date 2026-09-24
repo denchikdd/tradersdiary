@@ -197,6 +197,8 @@ test('HTTP auth, CSRF, encrypted storage, no returned credentials, logout, dedup
     const uploaded=await call('/notes/2026-09-16/images',{name:'chart.png',mime:'image/png',data:Buffer.from('image-bytes').toString('base64')});assert.equal(uploaded.status,201);const image=await uploaded.json();
     const savedNote=await (await call('/notes/2026-09-16')).json();assert.match(savedNote.note,/example\.com/);assert.equal(savedNote.images.length,1);assert.equal(savedNote.images[0].name,'chart.png');
     const servedImage=await call(`/notes/2026-09-16/images/${image.id}`);assert.equal(servedImage.status,200);assert.equal(servedImage.headers.get('content-type'),'image/png');assert.equal(await servedImage.text(),'image-bytes');
+    for(let i=0;i<10;i++)assert.equal((await call('/notes/2026-09-17/images',{name:`screen-${i}.png`,mime:'image/png',data:Buffer.from(`image-${i}`).toString('base64')})).status,201);
+    const tooMany=await call('/notes/2026-09-17/images',{name:'screen-11.png',mime:'image/png',data:Buffer.from('overflow').toString('base64')});assert.equal(tooMany.status,400);assert.match((await tooMany.json()).error,/10 скриншотов/);
     assert.equal((await call(`/notes/2026-09-16/images/${image.id}/delete`,{})).status,200);assert.equal((await (await call('/notes/2026-09-16')).json()).images.length,0);
     await call('/logout',{});assert.equal((await call('/connections')).status,401);
     for(let i=0;i<12;i++)await call('/login',{password:'wrong-password-long'});
