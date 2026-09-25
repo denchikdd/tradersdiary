@@ -74,3 +74,4 @@ export function createWorker(db,key,adapterFactory=createAdapter) {
   return {tick,start(){timer=setInterval(()=>void tick(),500);timer.unref();void tick();},async stop(){stopped=true;clearInterval(timer);while(busy)await new Promise(r=>setTimeout(r,50));}};
 }
 
+

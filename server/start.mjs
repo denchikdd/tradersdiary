@@ -56,3 +56,4 @@ server.requestTimeout=30000;server.headersTimeout=15000;
 server.listen(Number(process.env.PORT||5174),production?'0.0.0.0':'127.0.0.1',()=>{console.log('Journal server ready. Credentials and financial data are never logged.');worker.start();});
 async function stop(){server.close();await worker.stop();db.close();process.exit(0);}
 process.on('SIGTERM',stop);process.on('SIGINT',stop);
+
