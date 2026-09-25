@@ -12,7 +12,7 @@ export const catalog = [
   { id:'Bitget',enabled:true,passphrase:true,notice:'Classic и UTA определяются автоматически. Для UTA включите только чтение UTA management и UTA trading; тип ключа должен быть Read-only, без Withdraw.' },
   { id:'Aster',enabled:true,notice:'Aster V3: адрес и приватный ключ отдельного API Wallet с разрешением Read. Не используйте приватный ключ основного кошелька.' },
   { id:'KuCoin',enabled:true,passphrase:true,notice:'Spot-баланс и USDT Futures ledger. Оставьте только General/read permission.' },
-  { id:'MEXC',enabled:true,notice:'Spot-баланс и история перечисленных spot-пар (API ограничивает историю одним месяцем).' },
+  { id:'MEXC',enabled:true,notice:'Spot и USDT/USDC фьючерсы. Торговые пары определяются автоматически; spot API ограничивает историю одним месяцем.' },
   { id:'Lighter',enabled:true,address:true,notice:'Публичный адрес L1: капитал аккаунта. Для полной приватной истории позже понадобится signer API.' },
 ];
 const hmac = (secret, text, encoding='hex') => createHmac('sha256',secret).update(text).digest(encoding);

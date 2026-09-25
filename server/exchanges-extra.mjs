@@ -15,7 +15,7 @@ export function createExtraAdapter(exchange,credentials,options={},fetchImpl=fet
   let lastAsterNonce=0n;
   let kucoinApiVersion=credentials.apiVersion?String(credentials.apiVersion):null;
   async function asterRpc(method,params){let response;try{response=await fetchImpl('https://tapi.asterdex.com/info',{method:'POST',headers:{'Content-Type':'application/json','Accept':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method,params}),redirect:'error',signal:AbortSignal.timeout(20000)});}catch{throw new ExchangeError('Aster Chain RPC недоступен или истекло время ожидания.',true);}const body=await parse(response);if(body.error)throw new ExchangeError(`Aster RPC: ${body.error.message||body.error.code||'ошибка запроса'}`);return body.result;}
-  async function mexcContract(path,params={}){const sorted=Object.entries(params).filter(([,v])=>v!==undefined).sort(([a],[b])=>a.localeCompare(b)),query=new URLSearchParams(sorted.map(([k,v])=>[k,String(v)])).toString(),ts=String(Date.now()),headers={'ApiKey':credentials.apiKey,'Request-Time':ts,'Signature':hmac('sha256',credentials.secret,credentials.apiKey+ts+query),'Content-Type':'application/json'},body=await send(fetchImpl,`https://contract.mexc.com${path}${query?'?'+query:''}`,headers);if(body.success===false||Number(body.code)!==0)throw new ExchangeError(body.message||`Ошибка MEXC Futures ${body.code}.`);return body.data;}
+  async function mexcContract(path,params={}){const sorted=Object.entries(params).filter(([,v])=>v!==undefined).sort(([a],[b])=>a.localeCompare(b)),query=new URLSearchParams(sorted.map(([k,v])=>[k,String(v)])).toString(),ts=String(Date.now()),headers={'ApiKey':credentials.apiKey,'Request-Time':ts,'Signature':hmac('sha256',credentials.secret,credentials.apiKey+ts+query),'Content-Type':'application/json'},body=await send(fetchImpl,`https://api.mexc.com${path}${query?'?'+query:''}`,headers);if(body.success===false||Number(body.code)!==0)throw new ExchangeError(body.message||`Ошибка MEXC Futures ${body.code}.`);return body.data;}
   async function request(path,params={},host){
     const entries=Object.entries(params).filter(([,v])=>v!==undefined).map(([k,v])=>[k,String(v)]),query=new URLSearchParams(entries).toString(),now=Date.now();let url,headers={};
     if(exchange==='MEXC'){
@@ -60,6 +60,21 @@ export function createExtraAdapter(exchange,credentials,options={},fetchImpl=fet
     if(exchange==='KuCoin'){const info=await request('/api/v1/user/api-key');if(String(info.permission||'').split(',').some(v=>['Withdrawal','Transfer','InnerTransfer','FlexTransfers'].includes(v)))throw new ExchangeError('Отключите у ключа KuCoin вывод и переводы. Оставьте General для чтения.');return;}
     const accounts=await request('/api/v1/account',{by:'l1_address',value:credentials.address,active_only:false});if(!(accounts.accounts||accounts.data||[]).length)throw new ExchangeError('Аккаунт Lighter по этому адресу не найден.');
   }
+  async function prepare(){
+    if(exchange!=='MEXC'||options.spotAuto===false||options.mexcDiscoveryAt&&Date.now()-options.mexcDiscoveryAt<7*DAY)return false;
+    const configured=(options.spotSymbols||[]).map(v=>String(v).toUpperCase()),self=await request('/api/v3/selfSymbols'),listed=Array.isArray(self?.data)?self.data:Array.isArray(self)?self:[];
+    options.mexcSpotSymbols=[...new Set([...configured,...listed].map(v=>String(v).toUpperCase()).filter(v=>/^[A-Z0-9]{4,30}$/.test(v)))].sort();
+    if(options.futures!==false){
+      const futures=new Set((options.mexcFuturesSymbols||configured.map(v=>v.replace(/(USDT|USDC)$/,'_$1'))).filter(v=>/^[A-Z0-9]+_(USDT|USDC)$/.test(v)));
+      for(let page=1;page<=100;page++){
+        const data=await mexcContract('/api/v1/private/position/list/history_positions',{page_num:page,page_size:100}),rows=data?.resultList||data||[];
+        for(const row of rows)if(/^[A-Z0-9]+_(USDT|USDC)$/.test(String(row.symbol||'')))futures.add(String(row.symbol));
+        const total=Number(data?.totalPage||0);if(!Array.isArray(rows)||rows.length<100||total&&page>=total)break;
+      }
+      options.mexcFuturesSymbols=[...futures].sort();
+    }else options.mexcFuturesSymbols=[];
+    options.mexcDiscoveryAt=Date.now();return true;
+  }
   async function snapshot(){
     if(exchange==='Aster'){if(!credentials.apiKey||!credentials.secret)throw new ExchangeError('Переподключите Aster с read-only API Wallet.');const [futures,spot]=await Promise.all([asterPrivate('/fapi/v3/account'),asterPrivate('/api/v3/account',{},'https://sapi.asterdex.com').catch(()=>null)]);const futuresEquity=Array.isArray(futures)?stableTotal(futures):futures.totalMarginBalance||futures.totalWalletBalance||stableTotal(futures.assets||futures.balances||[]);return {equityUsd:decimal(units(futuresEquity||'0')+units(stableTotal(spot?.balances||[]))),availableUsd:Array.isArray(futures)?null:futures.availableBalance||null,wallet:futures,spot,scope:'spot-stablecoins+perpetuals'};}
     if(exchange==='MEXC'){const a=await request('/api/v3/account'),f=options.futures!==false?await mexcContract('/api/v1/private/account/assets'):[];return {equityUsd:decimal(units(stableTotal(a.balances))+units(stableTotal(f))),spot:a,futures:f,scope:'spot-stablecoins+futures',warning:'В spot-капитале учитываются USD-стейблкоины; остальные spot-активы пока не оценены.'};}
@@ -70,7 +85,7 @@ export function createExtraAdapter(exchange,credentials,options={},fetchImpl=fet
   }
   function streams(now){
     if(exchange==='Aster')return [{id:'income',start:0,window:7*DAY}];
-    if(exchange==='MEXC')return [...(options.spotSymbols||[]).map(symbol=>({id:'spot:'+symbol,start:now-30*DAY,window:7*DAY})),...(options.futures===false?[]:(options.spotSymbols||[]).map(symbol=>({id:'futures:'+symbol.replace(/(USDT|USDC)$/,'_$1'),start:now-89*DAY,window:89*DAY})))];
+    if(exchange==='MEXC'){const spot=options.mexcSpotSymbols||options.spotSymbols||[],futures=options.mexcFuturesSymbols||(options.spotSymbols||[]).map(symbol=>symbol.replace(/(USDT|USDC)$/,'_$1'));return [...spot.map(symbol=>({id:'spot:'+symbol,start:now-30*DAY,window:7*DAY})),...(options.futures===false?[]:futures.map(symbol=>({id:'futures:'+symbol,start:now-89*DAY,window:89*DAY})))];}
     if(exchange==='Gate.io')return [{id:'spot',start:now-365*DAY,window:7*DAY},...['pnl','fee','fund'].map(type=>({id:`futures:${type}`,start:now-179*DAY,window:7*DAY}))];
     if(exchange==='Bitget'){if(options.accountMode==='uta'){const categories=['SPOT','MARGIN','USDT-FUTURES','USDC-FUTURES','COIN-FUTURES'];return [...categories.map(category=>({id:`uta-fills:${category}`,start:now-89*DAY,window:30*DAY})),...categories.slice(2).map(category=>({id:`uta-funding:${category}`,start:now-89*DAY,window:30*DAY}))];}return ['USDT-FUTURES','USDC-FUTURES'].map(id=>({id:'bills:'+id,start:now-89*DAY,window:7*DAY}));}
     if(exchange==='KuCoin')return [{id:'futures-ledger',start:now-365*DAY,window:DAY}];
@@ -84,5 +99,5 @@ export function createExtraAdapter(exchange,credentials,options={},fetchImpl=fet
     if(exchange==='KuCoin'){const r=await request('/api/v1/transaction-history',{startAt:start,endAt:end,maxCount:50,offset:cursor||undefined,forward:true},'https://api-futures.kucoin.com');rows=r.dataList||[];next=r.hasMore&&rows.length?String(rows.at(-1).offset):null;return {events:rows.map(v=>event(v,{id:v.offset,time:v.time,kind:['RealisedPNL','FundingFee','TradingFee'].includes(v.type)?'pnl':'transfer',symbol:v.remark,gross:v.type==='RealisedPNL'?v.amount:'0',fee:v.type==='TradingFee'?decimal(-units(v.amount)):'0',funding:v.type==='FundingFee'?v.amount:'0',currency:v.currency})),next};}
     return {events:[],next:null};
   }
-  return {verify,snapshot,streams,page};
+  return {verify,prepare,snapshot,streams,page};
 }

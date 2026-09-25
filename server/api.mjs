@@ -65,7 +65,7 @@ export function createApi(db,key,{origin,secure,setupToken,adapterFactory=create
       const noteImages=path.match(/^\/notes\/(\d{4}-\d{2}-\d{2})\/images$/);
       if(noteImages&&method==='POST') {
         const date=noteDate(noteImages[1]);
-        if(db.prepare('SELECT count(*) AS n FROM note_images WHERE date=?').get(date).n>=12)throw new ApiError(400,'Для одного дня можно сохранить не больше 12 изображений.');
+        if(db.prepare('SELECT count(*) AS n FROM note_images WHERE date=?').get(date).n>=10)throw new ApiError(400,'Для одного дня можно сохранить не больше 10 скриншотов.');
         const input=await body(req,7*1024*1024),mime=String(input.mime||''),name=String(input.name||'Скриншот').slice(0,160);
         if(!['image/png','image/jpeg','image/webp'].includes(mime))throw new ApiError(415,'Поддерживаются PNG, JPEG и WebP.');
         if(typeof input.data!=='string'||input.data.length%4!==0||!/^[A-Za-z0-9+/]*={0,2}$/.test(input.data))throw new ApiError(400,'Повреждённое изображение.');
@@ -106,8 +106,7 @@ export function createApi(db,key,{origin,secure,setupToken,adapterFactory=create
         if(provider.address&&!/^0x[a-fA-F0-9]{40}$/.test(credentials.address))throw new ApiError(400,'Нужен публичный адрес 0x…');
         const symbols=(input.spotSymbols||'').toUpperCase().split(/[\s,]+/).filter(Boolean);
         if(symbols.length>100||symbols.some(s=>! /^[A-Z0-9]{4,30}$/.test(s)))throw new ApiError(400,'Пары spot: BTCUSDT, ETHUSDC, без слеша.');
-        const options={spotSymbols:symbols,futures:input.futures!==false,...(exchange==='Binance'?{spotAuto:true}:{})};
-        if(exchange==='MEXC'&&!symbols.length)throw new ApiError(400,'Укажите торговавшиеся spot-пары MEXC для загрузки истории.');
+        const options={spotSymbols:symbols,futures:input.futures!==false,...(['Binance','MEXC'].includes(exchange)?{spotAuto:true}:{})};
         const fingerprint=digest(exchange+':'+(credentials.apiKey||credentials.address.toLowerCase()));
         if(db.prepare('SELECT id FROM connections WHERE fingerprint=?').get(fingerprint))throw new ApiError(409,'Этот ключ или адрес уже подключён.');
         await adapterFactory(exchange,credentials,options).verify();

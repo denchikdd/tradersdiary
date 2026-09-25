@@ -5,7 +5,7 @@ import { createServer } from 'node:http';
 import { openDatabase,enqueue,savePage } from './database.mjs';
 import { encrypt,decrypt,units,decimal,passwordHash,passwordMatches } from './security.mjs';
 import { createApi } from './api.mjs';
-import { createWorker } from './worker.mjs';
+import { createWorker, SYNC_INTERVAL } from './worker.mjs';
 import { catalog,createAdapter,bybitEvent,binanceIncome,okxEvent,normalizedCapital } from './exchanges.mjs';
 
 test('AES-GCM authenticates credentials, account identity and ciphertext',()=>{
@@ -73,6 +73,21 @@ test('Binance discovers spot pairs automatically before loading their history',a
   const page=await adapter.page('spot-scan:BTCUSDT',2000,2000);
   assert.equal(page.discoveredSymbol,'BTCUSDT');assert.equal(page.events[0].symbol,'BTCUSDT');
   assert(calls.some(v=>v.includes('limit=1')));
+});
+test('MEXC discovers spot and futures symbols automatically',async()=>{
+  const options={spotAuto:true,futures:true,spotSymbols:[]},calls=[];
+  const adapter=createAdapter('MEXC',{apiKey:'key123',secret:'secret123'},options,async(url,init)=>{
+    calls.push({url,init});
+    if(url.includes('/api/v3/selfSymbols'))return new Response(JSON.stringify({code:200,data:['ETHUSDT','BTCUSDT','bad/symbol']}));
+    if(url.includes('/position/list/history_positions'))return new Response(JSON.stringify({success:true,code:0,data:{resultList:[{symbol:'SOL_USDT'},{symbol:'ETH_USDC'}],totalPage:1}}));
+    throw new Error(`Unexpected URL ${url}`);
+  });
+  assert.equal(await adapter.prepare(),true);
+  assert.deepEqual(options.mexcSpotSymbols,['BTCUSDT','ETHUSDT']);
+  assert.deepEqual(options.mexcFuturesSymbols,['ETH_USDC','SOL_USDT']);
+  assert.deepEqual(adapter.streams(Date.now()).map(v=>v.id),['spot:BTCUSDT','spot:ETHUSDT','futures:ETH_USDC','futures:SOL_USDT']);
+  assert(calls.find(v=>v.url.includes('/position/list/history_positions')).url.startsWith('https://api.mexc.com/'));
+  assert.equal(await adapter.prepare(),false);
 });
 test('all requested exchange adapters are enabled and sign read requests',async()=>{
   const expected=['Gate.io','Bitget','Aster','KuCoin','MEXC','Lighter'];assert(expected.every(id=>catalog.find(v=>v.id===id)?.enabled));
@@ -158,6 +173,19 @@ test('worker persists pages, resumes after restart and marks snapshot completion
   const worker=createWorker(db,key,factory);await worker.tick();await worker.stop();
   const restarted=createWorker(db,key,factory);await restarted.tick();await restarted.tick();assert.equal(calls,1);assert.equal(db.prepare('SELECT status FROM connections').get().status,'ready');await restarted.stop();db.close();
 });
+test('worker refreshes after five minutes and rotates long imports between exchanges',async()=>{
+  assert.equal(SYNC_INTERVAL,5*60*1000);
+  const db=openDatabase(':memory:'),key=randomBytes(32),first=addConnection(db,key),second='22222222-2222-4222-8222-222222222222';
+  db.prepare('INSERT INTO connections(id,exchange,label,secret,fingerprint,start,options,created) VALUES(?,?,?,?,?,?,?,?)').run(second,'OKX','Second',encrypt({apiKey:'key-2',secret:'secret-2',passphrase:'pass'},key,second),'fingerprint-2',Date.now()-10000,'{}',Date.now());
+  enqueue(db,first);enqueue(db,second);
+  db.prepare('UPDATE jobs SET updated=CASE connection_id WHEN ? THEN 1 ELSE 2 END').run(first);
+  const pages=[];
+  const factory=exchange=>({streams:()=>[{id:'ledger',start:0,window:1}],page:async()=>{pages.push(exchange);return {events:[],next:null};},snapshot:async()=>({wallet:[]})});
+  const worker=createWorker(db,key,factory);await worker.tick();await worker.tick();
+  assert.deepEqual(pages,['Bybit','OKX']);
+  assert.equal(db.prepare('SELECT count(*) AS n FROM snapshots').get().n,2);
+  await worker.stop();db.close();
+});
 test('HTTP auth, CSRF, encrypted storage, no returned credentials, logout, dedup and USD totals',async()=>{
   const db=openDatabase(':memory:'),key=randomBytes(32),setupToken='setup-token-long-enough-for-tests';
   const server=createServer();await new Promise(r=>server.listen(0,'127.0.0.1',r));const origin=`http://127.0.0.1:${server.address().port}`;
@@ -173,6 +201,8 @@ test('HTTP auth, CSRF, encrypted storage, no returned credentials, logout, dedup
     const credentials={exchange:'Bybit',label:'My account',apiKey:'private-key-123',secret:'private-secret-456',start:'2024-01-01'};
     const connected=await call('/connections',credentials);assert.equal(connected.status,201);const {id}=await connected.json();
     assert.equal((await call('/connections',credentials)).status,409);
+    const mexcConnected=await call('/connections',{exchange:'MEXC',label:'MEXC spot',apiKey:'mexc-read-key',secret:'mexc-read-secret',start:'2024-01-01',futures:true});
+    assert.equal(mexcConnected.status,201);
     const visible=await (await call('/connections')).text();assert(!visible.includes(credentials.apiKey));assert(!visible.includes(credentials.secret));assert(!visible.includes('fingerprint'));
     assert(!db.prepare('SELECT secret FROM connections').get().secret.includes(credentials.secret));
     const e={id:'a',time:Date.parse('2026-09-16T12:00:00Z'),kind:'pnl',market:'futures',symbol:'BTCUSDT',currency:'USDT',gross:'100.25',fee:'0.25',funding:'-1',raw:{}};
@@ -184,6 +214,8 @@ test('HTTP auth, CSRF, encrypted storage, no returned credentials, logout, dedup
     const uploaded=await call('/notes/2026-09-16/images',{name:'chart.png',mime:'image/png',data:Buffer.from('image-bytes').toString('base64')});assert.equal(uploaded.status,201);const image=await uploaded.json();
     const savedNote=await (await call('/notes/2026-09-16')).json();assert.match(savedNote.note,/example\.com/);assert.equal(savedNote.images.length,1);assert.equal(savedNote.images[0].name,'chart.png');
     const servedImage=await call(`/notes/2026-09-16/images/${image.id}`);assert.equal(servedImage.status,200);assert.equal(servedImage.headers.get('content-type'),'image/png');assert.equal(await servedImage.text(),'image-bytes');
+    for(let i=0;i<10;i++)assert.equal((await call('/notes/2026-09-17/images',{name:`screen-${i}.png`,mime:'image/png',data:Buffer.from(`image-${i}`).toString('base64')})).status,201);
+    const tooMany=await call('/notes/2026-09-17/images',{name:'screen-11.png',mime:'image/png',data:Buffer.from('overflow').toString('base64')});assert.equal(tooMany.status,400);assert.match((await tooMany.json()).error,/10 скриншотов/);
     assert.equal((await call(`/notes/2026-09-16/images/${image.id}/delete`,{})).status,200);assert.equal((await (await call('/notes/2026-09-16')).json()).images.length,0);
     await call('/logout',{});assert.equal((await call('/connections')).status,401);
     for(let i=0;i<12;i++)await call('/login',{password:'wrong-password-long'});

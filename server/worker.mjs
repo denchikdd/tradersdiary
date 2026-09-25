@@ -2,6 +2,9 @@ import { decrypt } from './security.mjs';
 import { createAdapter, DAY } from './exchanges.mjs';
 import { enqueue, savePage } from './database.mjs';
 
+export const SYNC_INTERVAL = 5*60*1000;
+const SNAPSHOT_INTERVAL = 5*60*1000;
+
 export function createWorker(db,key,adapterFactory=createAdapter) {
   let busy=false,stopped=false,timer;
   // One worker process per SQLite volume. Interrupted pages are safe to replay.
@@ -11,8 +14,9 @@ export function createWorker(db,key,adapterFactory=createAdapter) {
     busy=true;
     let job;
     try {
-      for(const c of db.prepare("SELECT id FROM connections WHERE disabled=0 AND synced IS NOT NULL AND synced<? AND status='ready'").all(Date.now()-15*60000)) enqueue(db,c.id);
-      job=db.prepare("SELECT * FROM jobs WHERE status='queued' AND next_run<=? ORDER BY id LIMIT 1").get(Date.now());
+      for(const c of db.prepare("SELECT id FROM connections WHERE disabled=0 AND synced IS NOT NULL AND synced<? AND status='ready'").all(Date.now()-SYNC_INTERVAL)) enqueue(db,c.id);
+      // Rotate long imports page by page so one account cannot hold up every other exchange.
+      job=db.prepare("SELECT * FROM jobs WHERE status='queued' AND next_run<=? ORDER BY updated,id LIMIT 1").get(Date.now());
       if(!job)return;
       const c=db.prepare('SELECT * FROM connections WHERE id=? AND disabled=0').get(job.connection_id);
       if(!c) {db.prepare("UPDATE jobs SET status='cancelled' WHERE id=?").run(job.id);return;}
@@ -27,11 +31,16 @@ export function createWorker(db,key,adapterFactory=createAdapter) {
       } else if(c.exchange==='Binance'&&options.spotAuto===true&&state.discoverSpot===undefined&&!options.spotDiscoveryAt) {
         state.discoverSpot=true;state.stream=0;delete state.start;delete state.cursor;
       }
+      const now=Date.now();
+      if(!state.snapshotAt||now-state.snapshotAt>=SNAPSHOT_INTERVAL) {
+        const snapshot=await adapter.snapshot();
+        state.snapshotAt=now;
+        db.prepare('INSERT INTO snapshots VALUES(?,?,?) ON CONFLICT(connection_id) DO UPDATE SET time=excluded.time,data=excluded.data').run(c.id,now,JSON.stringify(snapshot));
+        db.prepare('UPDATE jobs SET checkpoint=?,updated=? WHERE id=?').run(JSON.stringify(state),now,job.id);
+      }
       const streams=adapter.streams(state.end,state);
       if(state.stream>=streams.length) {
-        const snapshot=await adapter.snapshot();
         if(state.discoverSpot){options.spotDiscoveryAt=Date.now();db.prepare('UPDATE connections SET options=? WHERE id=?').run(JSON.stringify(options),c.id);}
-        db.prepare('INSERT INTO snapshots VALUES(?,?,?) ON CONFLICT(connection_id) DO UPDATE SET time=excluded.time,data=excluded.data').run(c.id,Date.now(),JSON.stringify(snapshot));
         db.prepare("UPDATE connections SET status='ready',synced=?,error=NULL WHERE id=?").run(state.end,c.id);
         db.prepare("UPDATE jobs SET status='done',updated=? WHERE id=?").run(Date.now(),job.id);
         return;
@@ -52,7 +61,7 @@ export function createWorker(db,key,adapterFactory=createAdapter) {
         else {state.start=end+1;delete state.cursor;}
         savePage(db,c.id,stream.id,page.events,job.id,state);
       }
-      db.prepare("UPDATE jobs SET status='queued',attempts=0 WHERE id=?").run(job.id);
+      db.prepare("UPDATE jobs SET status='queued',attempts=0,updated=? WHERE id=?").run(Date.now(),job.id);
     } catch(e) {
       if(job) {
         const retry=!!e.retryable && job.attempts<5;
