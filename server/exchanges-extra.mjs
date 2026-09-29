@@ -54,7 +54,14 @@ export function createExtraAdapter(exchange,credentials,options={},fetchImpl=fet
   }
   async function verify(){
     if(exchange==='Aster'){if(!credentials.apiKey||!credentials.secret)throw new ExchangeError('Укажите адрес и приватный ключ read-only API Wallet Aster.');await asterPrivate('/fapi/v3/account');return;}
-    if(exchange==='MEXC'){await request('/api/v3/account');if(options.futures!==false)await mexcContract('/api/v1/private/account/assets');return;}
+    if(exchange==='MEXC'){
+      await request('/api/v3/account');
+      if(options.futures!==false){
+        try{await mexcContract('/api/v1/private/account/assets');}
+        catch{options.futures=false;}
+      }
+      return;
+    }
     if(exchange==='Gate.io')return void await request('/spot/accounts');
     if(exchange==='Bitget'){try{await request('/api/v2/spot/account/assets');options.accountMode='classic';return;}catch(error){if(String(error.code)!=='40085')throw error;}const info=await request('/api/v3/account/info'),permType=String(info.permType||'').toLowerCase().replace(/[^a-z]/g,'');if(['readandwrite','readwrite','write','trade'].includes(permType))throw new ExchangeError('Ключ Bitget имеет право записи. Создайте отдельный ключ только для чтения.');const permissions=(Array.isArray(info.permissions)?info.permissions:[]).map(v=>String(v).toLowerCase());if(permissions.includes('withdraw'))throw new ExchangeError('Отключите у ключа Bitget разрешение Withdraw.');if(!permissions.includes('uta_mgt')||!permissions.includes('uta_trade'))throw new ExchangeError('Для Bitget UTA включите у read-only ключа разрешения UTA management и UTA trading.');await request('/api/v3/account/assets');options.accountMode='uta';return;}
     if(exchange==='KuCoin'){const info=await request('/api/v1/user/api-key');if(String(info.permission||'').split(',').some(v=>['Withdrawal','Transfer','InnerTransfer','FlexTransfers'].includes(v)))throw new ExchangeError('Отключите у ключа KuCoin вывод и переводы. Оставьте General для чтения.');return;}

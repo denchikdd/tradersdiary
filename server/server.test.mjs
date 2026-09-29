@@ -89,6 +89,20 @@ test('MEXC discovers spot and futures symbols automatically',async()=>{
   assert(calls.find(v=>v.url.includes('/position/list/history_positions')).url.startsWith('https://api.mexc.com/'));
   assert.equal(await adapter.prepare(),false);
 });
+test('MEXC accepts a valid spot-only key when Futures API is unavailable',async()=>{
+  const options={spotAuto:true,futures:true},calls=[];
+  const adapter=createAdapter('MEXC',{apiKey:'spot-key',secret:'spot-secret'},options,async(url,init)=>{
+    calls.push({url,init});
+    if(url.includes('/api/v3/account'))return new Response(JSON.stringify({accountType:'SPOT',balances:[]}));
+    if(url.includes('/api/v1/private/account/assets'))return new Response(JSON.stringify({code:400,message:'api key required'}),{status:400});
+    throw new Error(`Unexpected URL ${url}`);
+  });
+  await adapter.verify();
+  assert.equal(options.futures,false);
+  assert.equal(calls.length,2);
+  assert(calls[0].init.headers['X-MBX-APIKEY']);
+  assert(calls[1].init.headers.ApiKey);
+});
 test('all requested exchange adapters are enabled and sign read requests',async()=>{
   const expected=['Gate.io','Bitget','Aster','KuCoin','MEXC','Lighter'];assert(expected.every(id=>catalog.find(v=>v.id===id)?.enabled));
   const cases=[
