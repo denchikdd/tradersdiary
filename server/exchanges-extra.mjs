@@ -20,7 +20,7 @@ export function createExtraAdapter(exchange,credentials,options={},fetchImpl=fet
     const entries=Object.entries(params).filter(([,v])=>v!==undefined).map(([k,v])=>[k,String(v)]),query=new URLSearchParams(entries).toString(),now=Date.now();let url,headers={};
     if(exchange==='MEXC'){
       const signed=query+(query?'&':'')+`timestamp=${now}&recvWindow=10000`,base=host||'https://api.mexc.com';
-      url=`${base}${path}?${signed}&signature=${hmac('sha256',credentials.secret,signed)}`;headers={'X-MBX-APIKEY':credentials.apiKey};
+      url=`${base}${path}?${signed}&signature=${hmac('sha256',credentials.secret,signed)}`;headers={'X-MEXC-APIKEY':credentials.apiKey};
     }else if(exchange==='Gate.io'){
       const prefix='/api/v4',ts=String(Math.floor(now/1000)),rawQuery=entries.map(([k,v])=>`${k}=${v}`).join('&'),bodyHash=createHash('sha512').update('').digest('hex'),sign=`GET\n${prefix+path}\n${rawQuery}\n${bodyHash}\n${ts}`;
       url=`https://api.gateio.ws${prefix}${path}${query?'?'+query:''}`;headers={KEY:credentials.apiKey,Timestamp:ts,SIGN:hmac('sha512',credentials.secret,sign),Accept:'application/json','Content-Type':'application/json'};

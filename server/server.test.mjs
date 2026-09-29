@@ -93,14 +93,18 @@ test('MEXC accepts a valid spot-only key when Futures API is unavailable',async(
   const options={spotAuto:true,futures:true},calls=[];
   const adapter=createAdapter('MEXC',{apiKey:'spot-key',secret:'spot-secret'},options,async(url,init)=>{
     calls.push({url,init});
-    if(url.includes('/api/v3/account'))return new Response(JSON.stringify({accountType:'SPOT',balances:[]}));
+    if(url.includes('/api/v3/account')){
+      assert.equal(init.headers['X-MEXC-APIKEY'],'spot-key');
+      assert.equal(init.headers['X-MBX-APIKEY'],undefined);
+      return new Response(JSON.stringify({accountType:'SPOT',balances:[]}));
+    }
     if(url.includes('/api/v1/private/account/assets'))return new Response(JSON.stringify({code:400,message:'api key required'}),{status:400});
     throw new Error(`Unexpected URL ${url}`);
   });
   await adapter.verify();
   assert.equal(options.futures,false);
   assert.equal(calls.length,2);
-  assert(calls[0].init.headers['X-MBX-APIKEY']);
+  assert(calls[0].init.headers['X-MEXC-APIKEY']);
   assert(calls[1].init.headers.ApiKey);
 });
 test('all requested exchange adapters are enabled and sign read requests',async()=>{
@@ -110,7 +114,7 @@ test('all requested exchange adapters are enabled and sign read requests',async(
     ['Bitget',{apiKey:'key123',secret:'secret123',passphrase:'pass'},{},{code:'00000',data:[]},h=>h['ACCESS-SIGN']&&h['ACCESS-PASSPHRASE']],
     ['Aster',{apiKey:'0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf',secret:'0x0000000000000000000000000000000000000000000000000000000000000001'},{},{totalMarginBalance:'500'},h=>h.Accept==='application/json'],
     ['KuCoin',{apiKey:'key123',secret:'secret123',passphrase:'pass'},{},{code:'200000',data:{permission:'General'}},h=>h['KC-API-SIGN']&&h['KC-API-PASSPHRASE']],
-    ['MEXC',{apiKey:'key123',secret:'secret123'},{futures:false},{balances:[]},h=>h['X-MBX-APIKEY']],
+    ['MEXC',{apiKey:'key123',secret:'secret123'},{futures:false},{balances:[]},h=>h['X-MEXC-APIKEY']&&!h['X-MBX-APIKEY']],
     ['Lighter',{address:'0x1111111111111111111111111111111111111111'},{},{accounts:[{}]},h=>Object.keys(h).length===0],
   ];
   for(const [name,credentials,options,response,headersOk] of cases){let called;const adapter=createAdapter(name,credentials,options,async(url,init)=>{called={url,init};return new Response(JSON.stringify(response));});await adapter.verify();assert(headersOk(called.init.headers),`${name} auth headers`);assert(called.init.redirect==='error');if(name==='Aster'){assert(called.url.includes('signer=0x7E5F'));assert(called.url.includes('nonce='));assert(called.url.includes('signature=0x'));assert(!called.url.includes(credentials.secret));}}
