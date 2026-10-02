@@ -70,8 +70,9 @@ export function createExtraAdapter(exchange,credentials,options={},fetchImpl=fet
   async function prepare(){
     if(exchange==='Aster'){
       if(options.asterDiscoveryAt&&Date.now()-options.asterDiscoveryAt<7*DAY)return false;
-      const end=Date.now(),rows=await asterPrivate('/fapi/v3/income',{startTime:end-89*DAY,endTime:end,limit:1000});
-      options.asterSymbols=[...new Set([...(options.asterSymbols||[]),...rows.map(v=>String(v.symbol||'').toUpperCase())].filter(v=>/^[A-Z0-9]{4,30}$/.test(v)))].sort();
+      const end=Date.now(),symbols=new Set(options.asterSymbols||[]);
+      for(let start=end-89*DAY;start<end;start+=7*DAY){const rows=await asterPrivate('/fapi/v3/income',{startTime:start,endTime:Math.min(start+7*DAY-1,end),limit:1000});for(const row of rows)symbols.add(String(row.symbol||'').toUpperCase());}
+      options.asterSymbols=[...symbols].filter(v=>/^[A-Z0-9]{4,30}$/.test(v)).sort();
       options.asterDiscoveryAt=end;return true;
     }
     if(exchange!=='MEXC'||options.spotAuto===false||options.mexcDiscoveryAt&&Date.now()-options.mexcDiscoveryAt<7*DAY)return false;
