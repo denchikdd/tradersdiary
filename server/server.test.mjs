@@ -107,6 +107,17 @@ test('MEXC accepts a valid spot-only key when Futures API is unavailable',async(
   assert(calls[0].init.headers['X-MEXC-APIKEY']);
   assert(calls[1].init.headers.ApiKey);
 });
+test('Aster discovers traded symbols and imports private executions for chart reconstruction',async()=>{
+  const options={},calls=[];
+  const adapter=createAdapter('Aster',{apiKey:'0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf',secret:'0x0000000000000000000000000000000000000000000000000000000000000001'},options,async url=>{
+    calls.push(String(url));
+    if(String(url).includes('/income'))return new Response(JSON.stringify([{tranId:'p1',time:1760000000000,incomeType:'REALIZED_PNL',symbol:'AKEUSDT',asset:'USDT',income:'3.25'}]));
+    if(String(url).includes('/userTrades'))return new Response(JSON.stringify([{id:'t1',time:1760000000000,symbol:'AKEUSDT',side:'BUY',price:'1.02',qty:'10',realizedPnl:'3.25',commission:'0.01',commissionAsset:'USDT'}]));
+    throw new Error(`Unexpected URL ${url}`);
+  });
+  assert.equal(await adapter.prepare(),true);assert.deepEqual(options.asterSymbols,['AKEUSDT']);assert(adapter.streams(Date.now()).some(v=>v.id==='trades:AKEUSDT'));
+  const page=await adapter.page('trades:AKEUSDT',1759990000000,1760010000000);assert.equal(page.events[0].kind,'fill');assert.equal(page.events[0].raw.price,'1.02');assert(calls.some(v=>v.includes('symbol=AKEUSDT')));
+});
 test('all requested exchange adapters are enabled and sign read requests',async()=>{
   const expected=['Gate.io','Bitget','Aster','KuCoin','MEXC','Lighter'];assert(expected.every(id=>catalog.find(v=>v.id===id)?.enabled));
   const cases=[

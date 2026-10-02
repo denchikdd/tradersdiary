@@ -2,6 +2,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { encrypt,digest,passwordHash,passwordMatches,cents,units,decimal } from './security.mjs';
 import { enqueue } from './database.mjs';
 import { catalog,createAdapter,normalizedCapital } from './exchanges.mjs';
+import { buildTrades,marketCandles,normalizeExecution,tickerOf } from './trade-details.mjs';
 
 class ApiError extends Error { constructor(status,message){super(message);this.status=status;} }
 export function createApi(db,key,{origin,secure,setupToken,adapterFactory=createAdapter}) {
@@ -140,6 +141,21 @@ export function createApi(db,key,{origin,secure,setupToken,adapterFactory=create
         }
         const rows=[...groups.values()].map(r=>({...r,gross:cents(decimal(r.gross)),fee:cents(decimal(r.fee)),funding:cents(decimal(r.funding))}));
         return send(res,200,{rows,unvalued,notice:'Реализованный PnL фьючерсов. USDT/USDC приняты за 1 USD. Spot сохранён как исполнения, но прибыль не рассчитана без проверенной себестоимости. Процент PnL считается от текущего общего капитала всех подключённых счетов.'});
+      }
+      if(method==='GET'&&path==='/trade-details') {
+        const date=url.searchParams.get('date'),ticker=String(url.searchParams.get('ticker')||'').toUpperCase(),exchange=url.searchParams.get('exchange')||'all';
+        const day=Date.parse(date);if(!/^\d{4}-\d{2}-\d{2}$/.test(date||'')||!Number.isFinite(day)||!ticker||ticker.length>30)throw new ApiError(400,'Некорректный день или тикер.');
+        const rows=db.prepare(`SELECT e.*,c.exchange,c.label FROM events e JOIN connections c ON c.id=e.connection_id WHERE e.time>=? AND e.time<? AND e.kind IN ('fill','pnl') ORDER BY e.time`).all(day-7*86400000,day+86400000);
+        const relevant=rows.filter(v=>tickerOf(v.symbol)===ticker&&(exchange==='all'||v.exchange===exchange));
+        const executions=relevant.map(normalizeExecution).filter(Boolean),built=buildTrades(executions).filter(v=>{const time=v.exitTime||v.entryTime;return time>=day&&time<day+86400000;});
+        const pnlRows=relevant.filter(v=>v.kind==='pnl'&&v.time>=day&&v.time<day+86400000).map(v=>({id:`pnl:${v.connection_id}:${v.external_id}`,exchange:v.exchange,account:v.label,symbol:v.symbol,market:v.market,direction:'unknown',entryTime:v.time,exitTime:v.time,entryPrice:0,exitPrice:0,pnl:Number(v.gross)+Number(v.funding),fee:Number(v.fee),complete:false,executions:[]}));
+        const trades=built.length?built:pnlRows;
+        return send(res,200,{ticker,date,trades,executionCount:executions.length,limited:!built.length&&pnlRows.length>0});
+      }
+      if(method==='GET'&&path==='/market-chart') {
+        const exchange=url.searchParams.get('exchange'),symbol=url.searchParams.get('symbol'),market=url.searchParams.get('market')==='spot'?'spot':'futures',from=Number(url.searchParams.get('from')),to=Number(url.searchParams.get('to')),intervalMs=Number(url.searchParams.get('interval'));
+        if(!catalog.some(v=>v.id===exchange)||!/^[A-Z0-9_\-/]{3,40}$/i.test(symbol||'')||!Number.isFinite(from)||!Number.isFinite(to)||to<=from||to-from>3600000||![1000,5000,15000,60000,300000].includes(intervalMs))throw new ApiError(400,'Некорректные параметры графика.');
+        const candles=await marketCandles({exchange,symbol,market,from,to,intervalMs});return send(res,200,{candles,source:candles.length?'exchange':'unavailable'});
       }
       if(method==='GET'&&path==='/fills') {
         const from=Date.parse(url.searchParams.get('from')),to=Date.parse(url.searchParams.get('to'));
