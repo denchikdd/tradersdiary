@@ -1,4 +1,7 @@
+import { inflateRawSync } from 'node:zlib';
+
 const QUOTES=['USDT','USDC','USD'];
+const archiveCache=new Map();
 
 export function tickerOf(symbol=''){
   const clean=String(symbol).toUpperCase().replace(/[-_/]?SWAP$/,'').replace(/[^A-Z0-9]/g,'');
@@ -51,14 +54,36 @@ export function aggregateTrades(rows,intervalMs){
   return [...buckets.values()].sort((a,b)=>a.time-b.time);
 }
 
+function unzipFirst(buffer){
+  let eocd=-1;for(let i=buffer.length-22;i>=Math.max(0,buffer.length-65557);i--)if(buffer.readUInt32LE(i)===0x06054b50){eocd=i;break;}
+  if(eocd<0)throw new Error('Повреждённый архив Binance.');const central=buffer.readUInt32LE(eocd+16);if(buffer.readUInt32LE(central)!==0x02014b50)throw new Error('Повреждённый архив Binance.');
+  const method=buffer.readUInt16LE(central+10),compressed=buffer.readUInt32LE(central+20),uncompressed=buffer.readUInt32LE(central+24),local=buffer.readUInt32LE(central+42);if(uncompressed>250*1024*1024)throw new Error('Архив Binance слишком большой.');
+  const start=local+30+buffer.readUInt16LE(local+26)+buffer.readUInt16LE(local+28),data=buffer.subarray(start,start+compressed);return method===8?inflateRawSync(data):method===0?data:Buffer.alloc(0);
+}
+
+async function binanceArchiveRows(symbol,from,to,fetchImpl){
+  const rows=[];let day=Date.UTC(new Date(from).getUTCFullYear(),new Date(from).getUTCMonth(),new Date(from).getUTCDate());
+  for(;day<=to;day+=86400000){const date=new Date(day).toISOString().slice(0,10),key=`${symbol}:${date}`;let zip=archiveCache.get(key);
+    if(!zip){const url=`https://data.binance.vision/data/futures/um/daily/aggTrades/${symbol}/${symbol}-aggTrades-${date}.zip`,response=await fetchImpl(url,{headers:{Accept:'application/zip'},redirect:'error',signal:AbortSignal.timeout(30000)});if(!response.ok)continue;const length=Number(response.headers.get('content-length')||0);if(length>30*1024*1024)continue;zip=Buffer.from(await response.arrayBuffer());archiveCache.set(key,zip);while(archiveCache.size>4)archiveCache.delete(archiveCache.keys().next().value);}
+    const csv=unzipFirst(zip).toString('utf8');let offset=0;
+    while(offset<csv.length){const next=csv.indexOf('\n',offset),line=csv.slice(offset,next<0?csv.length:next);offset=next<0?csv.length:next+1;if(!/^\d/.test(line))continue;const fields=line.split(','),rawTime=Number(fields[5]),time=rawTime>1e14?Math.floor(rawTime/1000):rawTime;if(time>=from&&time<=to)rows.push({T:time,p:fields[1],q:fields[2]});}
+  }
+  return rows;
+}
+
 export async function marketCandles({exchange,symbol,market,from,to,intervalMs,fetchImpl=fetch}){
   const safeSymbol=String(symbol).toUpperCase().replace(/[^A-Z0-9]/g,'');if(!safeSymbol)throw new Error('Некорректный тикер.');
+  if(intervalMs>=60000){
+    const intervals={60000:'1m',300000:'5m',3600000:'1h',86400000:'1d'},interval=intervals[intervalMs],endpoints={Aster:market==='spot'?'https://sapi.asterdex.com/api/v3/klines':'https://fapi.asterdex.com/fapi/v3/klines',Binance:market==='spot'?'https://api.binance.com/api/v3/klines':'https://fapi.binance.com/fapi/v1/klines',MEXC:'https://api.mexc.com/api/v3/klines'},endpoint=endpoints[exchange];if(!endpoint||!interval)return [];
+    const url=new URL(endpoint);url.searchParams.set('symbol',safeSymbol);url.searchParams.set('interval',interval);url.searchParams.set('startTime',String(from));url.searchParams.set('endTime',String(to));url.searchParams.set('limit','1000');const response=await fetchImpl(url,{headers:{Accept:'application/json'},redirect:'error',signal:AbortSignal.timeout(15000)});if(!response.ok)return [];
+    const body=await response.json(),rows=Array.isArray(body)?body:body?.data||[];return rows.map(v=>({time:Number(v[0]),open:Number(v[1]),high:Number(v[2]),low:Number(v[3]),close:Number(v[4]),volume:Number(v[5])})).filter(v=>Number.isFinite(v.time)&&Number.isFinite(v.close));
+  }
   const hosts={Aster:market==='spot'?'https://sapi.asterdex.com/api/v3/aggTrades':'https://fapi.asterdex.com/fapi/v3/aggTrades',Binance:market==='spot'?'https://api.binance.com/api/v3/aggTrades':'https://fapi.binance.com/fapi/v1/aggTrades',MEXC:'https://api.mexc.com/api/v3/aggTrades'};
   const endpoint=hosts[exchange];if(!endpoint)return [];
   const rows=[];let cursor=from;
   for(let page=0;page<8&&cursor<=to;page++){
     const url=new URL(endpoint);url.searchParams.set('symbol',safeSymbol);url.searchParams.set('startTime',String(cursor));url.searchParams.set('endTime',String(to));url.searchParams.set('limit','1000');
-    const response=await fetchImpl(url,{headers:{Accept:'application/json'},redirect:'error',signal:AbortSignal.timeout(15000)});if(!response.ok)return [];
+    const response=await fetchImpl(url,{headers:{Accept:'application/json'},redirect:'error',signal:AbortSignal.timeout(15000)});if(!response.ok){if(exchange==='Binance'&&market!=='spot')return aggregateTrades(await binanceArchiveRows(safeSymbol,from,to,fetchImpl),intervalMs);return [];}
     const body=await response.json(),batch=Array.isArray(body)?body:body?.data||[];rows.push(...batch);if(batch.length<1000)break;
     const lastTime=number(batch.at(-1)?.T,batch.at(-1)?.time,batch.at(-1)?.ts);if(!lastTime||lastTime<cursor)break;cursor=lastTime+1;
   }

@@ -22,11 +22,16 @@ export function createWorker(db,key,adapterFactory=createAdapter) {
       if(!c) {db.prepare("UPDATE jobs SET status='cancelled' WHERE id=?").run(job.id);return;}
       db.prepare("UPDATE jobs SET status='running',updated=? WHERE id=?").run(Date.now(),job.id);
       db.prepare("UPDATE connections SET status='syncing',error=NULL WHERE id=?").run(c.id);
-      const options=JSON.parse(c.options),adapter=adapterFactory(c.exchange,decrypt(c.secret,key,c.id),options);
+      const options=JSON.parse(c.options);
+      if(c.exchange==='Binance'){
+        const symbols=new Set(options.futuresSymbols||[]);for(const row of db.prepare("SELECT DISTINCT symbol FROM events WHERE connection_id=? AND market='futures' AND symbol<>''").all(c.id))symbols.add(row.symbol);
+        const found=[...symbols].filter(v=>/^[A-Z0-9]{4,30}$/.test(v)).sort();if(JSON.stringify(found)!==JSON.stringify(options.futuresSymbols||[])){options.futuresSymbols=found;db.prepare('UPDATE connections SET options=? WHERE id=?').run(JSON.stringify(options),c.id);}
+      }
+      const adapter=adapterFactory(c.exchange,decrypt(c.secret,key,c.id),options);
       if(adapter.prepare && await adapter.prepare()) db.prepare('UPDATE connections SET options=? WHERE id=?').run(JSON.stringify(options),c.id);
       const state=JSON.parse(job.checkpoint);
       if(!state.end) {
-        state.end=Date.now();state.stream=0;state.effectiveStart=c.synced?Math.max(c.start,c.synced-2*DAY):c.start;
+        state.end=Date.now();state.stream=0;state.binanceFuturesBackfill=c.exchange==='Binance'&&!options.futuresTradesBackfillAt;state.effectiveStart=state.binanceFuturesBackfill?Math.max(c.start,state.end-89*DAY):c.synced?Math.max(c.start,c.synced-2*DAY):c.start;
         state.discoverSpot=c.exchange==='Binance'&&options.spotAuto===true&&(!options.spotDiscoveryAt||Date.now()-options.spotDiscoveryAt>7*DAY);
       } else if(c.exchange==='Binance'&&options.spotAuto===true&&state.discoverSpot===undefined&&!options.spotDiscoveryAt) {
         state.discoverSpot=true;state.stream=0;delete state.start;delete state.cursor;
@@ -41,6 +46,7 @@ export function createWorker(db,key,adapterFactory=createAdapter) {
       const streams=adapter.streams(state.end,state);
       if(state.stream>=streams.length) {
         if(state.discoverSpot){options.spotDiscoveryAt=Date.now();db.prepare('UPDATE connections SET options=? WHERE id=?').run(JSON.stringify(options),c.id);}
+        if(state.binanceFuturesBackfill){options.futuresTradesBackfillAt=Date.now();db.prepare('UPDATE connections SET options=? WHERE id=?').run(JSON.stringify(options),c.id);}
         db.prepare("UPDATE connections SET status='ready',synced=?,error=NULL WHERE id=?").run(state.end,c.id);
         db.prepare("UPDATE jobs SET status='done',updated=? WHERE id=?").run(Date.now(),job.id);
         return;
@@ -54,6 +60,10 @@ export function createWorker(db,key,adapterFactory=createAdapter) {
         if(page.discoveredSymbol&&!options.spotSymbols.includes(page.discoveredSymbol)) {
           options.spotSymbols.push(page.discoveredSymbol);options.spotSymbols.sort();
           db.prepare('UPDATE connections SET options=? WHERE id=?').run(JSON.stringify(options),c.id);
+        }
+        if(Array.isArray(page.discoveredFuturesSymbols)) {
+          const symbols=new Set(options.futuresSymbols||[]);for(const symbol of page.discoveredFuturesSymbols)symbols.add(symbol);
+          options.futuresSymbols=[...symbols].sort();db.prepare('UPDATE connections SET options=? WHERE id=?').run(JSON.stringify(options),c.id);
         }
         if(page.next && page.next===state.cursor) throw new Error('Биржа повторила курсор. Синхронизация остановлена без потери данных.');
         if(page.next) {state.start=start;state.cursor=page.next;}

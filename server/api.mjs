@@ -154,7 +154,8 @@ export function createApi(db,key,{origin,secure,setupToken,adapterFactory=create
       }
       if(method==='GET'&&path==='/market-chart') {
         const exchange=url.searchParams.get('exchange'),symbol=url.searchParams.get('symbol'),market=url.searchParams.get('market')==='spot'?'spot':'futures',from=Number(url.searchParams.get('from')),to=Number(url.searchParams.get('to')),intervalMs=Number(url.searchParams.get('interval'));
-        if(!catalog.some(v=>v.id===exchange)||!/^[A-Z0-9_\-/]{3,40}$/i.test(symbol||'')||!Number.isFinite(from)||!Number.isFinite(to)||to<=from||to-from>3600000||![1000,5000,15000,60000,300000].includes(intervalMs))throw new ApiError(400,'Некорректные параметры графика.');
+        const maxRange=intervalMs===86400000?180*86400000:intervalMs===3600000?14*86400000:intervalMs>=60000?2*86400000:3600000;
+        if(!catalog.some(v=>v.id===exchange)||!/^[A-Z0-9_\-/]{3,40}$/i.test(symbol||'')||!Number.isFinite(from)||!Number.isFinite(to)||to<=from||to-from>maxRange||![1000,5000,15000,60000,300000,3600000,86400000].includes(intervalMs))throw new ApiError(400,'Некорректные параметры графика.');
         const candles=await marketCandles({exchange,symbol,market,from,to,intervalMs});return send(res,200,{candles,source:candles.length?'exchange':'unavailable'});
       }
       if(method==='GET'&&path==='/fills') {

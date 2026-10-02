@@ -118,6 +118,7 @@ export function createAdapter(exchange, credentials, options={}, fetchImpl=fetch
     if(exchange==='Bybit') return ['fills:spot','fills:linear','ledger:linear'].map(id=>({id,start:now-729*DAY,window:7*DAY}));
     if(exchange==='Binance') return [
       ...(options.futures!==false?[{id:'income',start:now-89*DAY,window:7*DAY}]:[]),
+      ...(options.futuresSymbols||[]).map(symbol=>({id:'futures:'+symbol,start:now-89*DAY,window:7*DAY})),
       ...(state.discoverSpot?(options.spotCandidates||[]).map(symbol=>({id:'spot-scan:'+symbol,start:now,window:1})):[]),
       ...(options.spotSymbols||[]).map(symbol=>({id:'spot:'+symbol,start:Date.UTC(2017,6,1),window:DAY})),
     ];
@@ -136,7 +137,12 @@ export function createAdapter(exchange, credentials, options={}, fetchImpl=fetch
       if(stream==='income') {
         rows=await request('/fapi/v1/income',{startTime:start,endTime:end,limit:1000,page:cursor||1});
         next=rows.length===1000?String(Number(cursor||1)+1):null;
-        return {events:rows.map(binanceIncome),next};
+        return {events:rows.map(binanceIncome),next,discoveredFuturesSymbols:[...new Set(rows.map(v=>String(v.symbol||'')).filter(v=>/^[A-Z0-9]{4,30}$/.test(v)))]};
+      }
+      if(stream.startsWith('futures:')){
+        const symbol=stream.slice(8);rows=await request('/fapi/v1/userTrades',{symbol,...(cursor?{fromId:cursor}:{startTime:start,endTime:end}),limit:1000});
+        const filtered=rows.filter(v=>v.time<=end&&v.time>=start);next=rows.length===1000&&rows.at(-1).time<=end?String(BigInt(rows.at(-1).id)+1n):null;
+        return {events:filtered.map(v=>({id:String(v.id),time:v.time,kind:'fill',market:'futures',symbol,currency:v.commissionAsset||'USDT',gross:'0',fee:v.commission||'0',funding:'0',raw:v})),next};
       }
       const scan=stream.startsWith('spot-scan:'),symbol=stream.slice(scan?10:5);
       if(scan) {
