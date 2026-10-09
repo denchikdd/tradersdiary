@@ -246,6 +246,11 @@ test('HTTP auth, CSRF, encrypted storage, no returned credentials, logout, dedup
     for(let i=0;i<10;i++)assert.equal((await call('/notes/2026-09-17/images',{name:`screen-${i}.png`,mime:'image/png',data:Buffer.from(`image-${i}`).toString('base64')})).status,201);
     const tooMany=await call('/notes/2026-09-17/images',{name:'screen-11.png',mime:'image/png',data:Buffer.from('overflow').toString('base64')});assert.equal(tooMany.status,400);assert.match((await tooMany.json()).error,/10 скриншотов/);
     assert.equal((await call(`/notes/2026-09-16/images/${image.id}/delete`,{})).status,200);assert.equal((await (await call('/notes/2026-09-16')).json()).images.length,0);
+    const tradeKey=encodeURIComponent('Binance:BTCUSDT:1790000000000:0');assert.equal((await call(`/trade-notes/${tradeKey}`,{note:'Разбор https://youtube.com/watch?v=test'})).status,200);
+    const tradeUpload=await call(`/trade-notes/${tradeKey}/images`,{name:'entry.png',mime:'image/png',data:Buffer.from('trade-image').toString('base64')});assert.equal(tradeUpload.status,201);const tradeImage=await tradeUpload.json();
+    const tradeNote=await (await call(`/trade-notes/${tradeKey}`)).json();assert.match(tradeNote.note,/youtube\.com/);assert.equal(tradeNote.images.length,1);
+    const servedTradeImage=await call(`/trade-notes/${tradeKey}/images/${tradeImage.id}`);assert.equal(servedTradeImage.status,200);assert.equal(await servedTradeImage.text(),'trade-image');
+    assert.equal((await call(`/trade-notes/${tradeKey}/images/${tradeImage.id}/delete`,{})).status,200);
     await call('/logout',{});assert.equal((await call('/connections')).status,401);
     for(let i=0;i<12;i++)await call('/login',{password:'wrong-password-long'});
     assert.equal((await call('/login',{password:'test-owner-password'})).status,429);

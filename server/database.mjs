@@ -40,6 +40,14 @@ export function openDatabase(path) {
       name TEXT NOT NULL, mime TEXT NOT NULL, size INTEGER NOT NULL, data BLOB NOT NULL, created INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS note_images_date ON note_images(date,created);
+    CREATE TABLE IF NOT EXISTS trade_notes (
+      trade_key TEXT PRIMARY KEY, note TEXT NOT NULL DEFAULT '', updated INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS trade_note_images (
+      id TEXT PRIMARY KEY, trade_key TEXT NOT NULL REFERENCES trade_notes(trade_key) ON DELETE CASCADE,
+      name TEXT NOT NULL, mime TEXT NOT NULL, size INTEGER NOT NULL, data BLOB NOT NULL, created INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS trade_note_images_key ON trade_note_images(trade_key,created);
     CREATE TABLE IF NOT EXISTS login_attempts (bucket TEXT PRIMARY KEY, attempts INTEGER NOT NULL, expires INTEGER NOT NULL);
     PRAGMA user_version=1;
   `);

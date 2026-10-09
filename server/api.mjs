@@ -21,6 +21,7 @@ export function createApi(db,key,{origin,secure,setupToken,adapterFactory=create
   }
   function text(v,min=1,max=512) {if(typeof v!=='string'||v.length<min||v.length>max)throw new ApiError(400,'Проверьте заполнение полей.');return v;}
   function noteDate(v) {if(!/^\d{4}-\d{2}-\d{2}$/.test(v||'')||new Date(v+'T00:00:00.000Z').toISOString().slice(0,10)!==v)throw new ApiError(400,'Некорректная дата заметки.');return v;}
+  function tradeNoteKey(v) {let key='';try{key=decodeURIComponent(v||'');}catch{}if(!/^[A-Za-z0-9:._-]{8,240}$/.test(key))throw new ApiError(400,'Некорректный идентификатор сделки.');return key;}
   function rateLimit() {
     // Global persisted limiter, independent of attacker-controlled forwarded IP headers.
     const old=db.prepare("SELECT * FROM login_attempts WHERE bucket='owner'").get();
@@ -88,6 +89,42 @@ export function createApi(db,key,{origin,secure,setupToken,adapterFactory=create
       const deleteNoteImage=path.match(/^\/notes\/(\d{4}-\d{2}-\d{2})\/images\/([a-f0-9-]{36})\/delete$/);
       if(deleteNoteImage&&method==='POST') {
         const date=noteDate(deleteNoteImage[1]),result=db.prepare('DELETE FROM note_images WHERE id=? AND date=?').run(deleteNoteImage[2],date);
+        if(!result.changes)throw new ApiError(404,'Изображение не найдено.');return send(res,200,{ok:true});
+      }
+      const tradeNote=path.match(/^\/trade-notes\/([^/]+)$/);
+      if(tradeNote&&method==='GET') {
+        const tradeKey=tradeNoteKey(tradeNote[1]),row=db.prepare('SELECT note,updated FROM trade_notes WHERE trade_key=?').get(tradeKey);
+        const images=db.prepare('SELECT id,name,mime,size,created FROM trade_note_images WHERE trade_key=? ORDER BY created,id').all(tradeKey);
+        return send(res,200,{tradeKey,note:row?.note||'',updatedAt:row?.updated||null,images});
+      }
+      if(tradeNote&&method==='POST') {
+        const tradeKey=tradeNoteKey(tradeNote[1]),input=await body(req,32768),value=typeof input.note==='string'?input.note:'';
+        if(value.length>20000)throw new ApiError(413,'Заметка не должна превышать 20 000 символов.');
+        const now=Date.now();db.prepare(`INSERT INTO trade_notes(trade_key,note,updated) VALUES(?,?,?)
+          ON CONFLICT(trade_key) DO UPDATE SET note=excluded.note,updated=excluded.updated`).run(tradeKey,value,now);
+        return send(res,200,{ok:true,updatedAt:now});
+      }
+      const tradeNoteImages=path.match(/^\/trade-notes\/([^/]+)\/images$/);
+      if(tradeNoteImages&&method==='POST') {
+        const tradeKey=tradeNoteKey(tradeNoteImages[1]);
+        if(db.prepare('SELECT count(*) AS n FROM trade_note_images WHERE trade_key=?').get(tradeKey).n>=10)throw new ApiError(400,'Для одной сделки можно сохранить не больше 10 скриншотов.');
+        const input=await body(req,7*1024*1024),mime=String(input.mime||''),name=String(input.name||'Скриншот').slice(0,160);
+        if(!['image/png','image/jpeg','image/webp'].includes(mime))throw new ApiError(415,'Поддерживаются PNG, JPEG и WebP.');
+        if(typeof input.data!=='string'||input.data.length%4!==0||!/^[A-Za-z0-9+/]*={0,2}$/.test(input.data))throw new ApiError(400,'Повреждённое изображение.');
+        const data=Buffer.from(input.data,'base64');if(!data.length||data.length>5*1024*1024)throw new ApiError(413,'Размер изображения не должен превышать 5 МБ.');
+        const id=randomUUID(),now=Date.now();db.exec('BEGIN IMMEDIATE');try{
+          db.prepare(`INSERT INTO trade_notes(trade_key,note,updated) VALUES(?,'',?) ON CONFLICT(trade_key) DO NOTHING`).run(tradeKey,now);
+          db.prepare('INSERT INTO trade_note_images VALUES(?,?,?,?,?,?,?)').run(id,tradeKey,name,mime,data.length,data,now);db.exec('COMMIT');
+        }catch(e){db.exec('ROLLBACK');throw e;}return send(res,201,{id,name,mime,size:data.length,created:now});
+      }
+      const tradeNoteImage=path.match(/^\/trade-notes\/([^/]+)\/images\/([a-f0-9-]{36})$/);
+      if(tradeNoteImage&&method==='GET') {
+        const tradeKey=tradeNoteKey(tradeNoteImage[1]),image=db.prepare('SELECT mime,data FROM trade_note_images WHERE id=? AND trade_key=?').get(tradeNoteImage[2],tradeKey);
+        if(!image)throw new ApiError(404,'Изображение не найдено.');res.writeHead(200,{'Content-Type':image.mime,'Content-Length':image.data.length,'Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff','Cross-Origin-Resource-Policy':'same-origin'});return res.end(image.data);
+      }
+      const deleteTradeNoteImage=path.match(/^\/trade-notes\/([^/]+)\/images\/([a-f0-9-]{36})\/delete$/);
+      if(deleteTradeNoteImage&&method==='POST') {
+        const tradeKey=tradeNoteKey(deleteTradeNoteImage[1]),result=db.prepare('DELETE FROM trade_note_images WHERE id=? AND trade_key=?').run(deleteTradeNoteImage[2],tradeKey);
         if(!result.changes)throw new ApiError(404,'Изображение не найдено.');return send(res,200,{ok:true});
       }
       if(method==='GET'&&path==='/connections') {
