@@ -80,8 +80,8 @@ export async function marketCandles({exchange,symbol,market,from,to,intervalMs,f
   }
   const hosts={Aster:market==='spot'?'https://sapi.asterdex.com/api/v3/aggTrades':'https://fapi.asterdex.com/fapi/v3/aggTrades',Binance:market==='spot'?'https://api.binance.com/api/v3/aggTrades':'https://fapi.binance.com/fapi/v1/aggTrades',MEXC:'https://api.mexc.com/api/v3/aggTrades'};
   const endpoint=hosts[exchange];if(!endpoint)return [];
-  const rows=[];let cursor=from;
-  for(let page=0;page<8&&cursor<=to;page++){
+  const rows=[];let cursor=from;const maxPages=intervalMs===1000?64:16;
+  for(let page=0;page<maxPages&&cursor<=to;page++){
     const url=new URL(endpoint);url.searchParams.set('symbol',safeSymbol);url.searchParams.set('startTime',String(cursor));url.searchParams.set('endTime',String(to));url.searchParams.set('limit','1000');
     const response=await fetchImpl(url,{headers:{Accept:'application/json'},redirect:'error',signal:AbortSignal.timeout(15000)});if(!response.ok){if(exchange==='Binance'&&market!=='spot')return aggregateTrades(await binanceArchiveRows(safeSymbol,from,to,fetchImpl),intervalMs);return [];}
     const body=await response.json(),batch=Array.isArray(body)?body:body?.data||[];rows.push(...batch);if(batch.length<1000)break;
