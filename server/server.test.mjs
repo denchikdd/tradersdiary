@@ -240,12 +240,14 @@ test('worker refreshes after five minutes and rotates long imports between excha
 });
 test('worker refreshes recent PnL before a long historical import finishes',async()=>{
   const db=openDatabase(':memory:'),key=randomBytes(32),id=addConnection(db,key),now=Date.now();
-  db.prepare('UPDATE connections SET start=? WHERE id=?').run(now-30*86400000,id);enqueue(db,id);
+  db.prepare("UPDATE connections SET exchange='Bitget',start=?,options=? WHERE id=?").run(now-30*86400000,JSON.stringify({accountMode:'classic'}),id);enqueue(db,id);
   const pages=[];
   const factory=()=>({streams:()=>[{id:'ledger',start:0,window:3*86400000}],page:async(_stream,start,end)=>{pages.push({start,end});return {events:[{id:'recent',time:now,kind:'pnl',market:'futures',symbol:'BTCUSDT',currency:'USDT',gross:'1',raw:{}}],next:null};},snapshot:async()=>({wallet:[]})});
   const worker=createWorker(db,key,factory);await worker.tick();await worker.tick();
   const connection=db.prepare('SELECT status,synced FROM connections WHERE id=?').get(id),state=JSON.parse(db.prepare('SELECT checkpoint FROM jobs WHERE connection_id=?').get(id).checkpoint);
-  assert.equal(pages.length,1);assert(pages[0].start>=now-2*86400000-1000);assert(connection.synced>=now-1000);assert.equal(connection.status,'syncing');assert.equal(state.stream,0);assert.equal(state.live,undefined);
+  assert.equal(pages.length,1);assert(pages[0].start>=now-2*86400000-1000);assert(connection.synced>=now-1000);assert.equal(connection.status,'syncing');assert.equal(state.stream,0);assert.equal(state.live,undefined);assert.equal(state.pnlAuditV2,true);
+  for(let i=0;i<20&&db.prepare('SELECT status FROM connections WHERE id=?').get(id).status!=='ready';i++)await worker.tick();
+  assert(db.prepare('SELECT options FROM connections WHERE id=?').get(id).options.includes('pnlAuditV2At'));
   await worker.stop();db.close();
 });
 test('HTTP auth, CSRF, encrypted storage, no returned credentials, logout, dedup and USD totals',async()=>{

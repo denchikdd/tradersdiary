@@ -47,15 +47,20 @@ export function createWorker(db,key,adapterFactory=createAdapter) {
       const adapter=adapterFactory(c.exchange,decrypt(c.secret,key,c.id),options);
       if(adapter.prepare && await adapter.prepare()) db.prepare('UPDATE connections SET options=? WHERE id=?').run(JSON.stringify(options),c.id);
       const state=JSON.parse(job.checkpoint);
+      const repairRequired=['Aster','Gate.io','Bitget'].includes(c.exchange)&&!options.pnlAuditV2At;
       if(!state.end) {
-        state.end=Date.now();state.stream=0;state.binanceFuturesBackfill=c.exchange==='Binance'&&!options.futuresTradesBackfillAt;state.effectiveStart=state.binanceFuturesBackfill?Math.max(c.start,state.end-89*DAY):c.synced?Math.max(c.start,c.synced-2*DAY):c.start;
+        state.end=Date.now();state.stream=0;state.pnlAuditV2=repairRequired;state.binanceFuturesBackfill=c.exchange==='Binance'&&!options.futuresTradesBackfillAt;state.effectiveStart=repairRequired?c.start:state.binanceFuturesBackfill?Math.max(c.start,state.end-89*DAY):c.synced?Math.max(c.start,c.synced-2*DAY):c.start;
         state.discoverSpot=c.exchange==='Binance'&&options.spotAuto===true&&(!options.spotDiscoveryAt||Date.now()-options.spotDiscoveryAt>7*DAY);
         // A long first import must not hide today's trades until years of old
         // pages have finished. Short imports already are their own live pass.
-        if(c.synced===null&&state.effectiveStart<state.end-LIVE_LOOKBACK)state.live=freshPass(c,state,state.end);
+        if((c.synced===null||repairRequired)&&state.effectiveStart<state.end-LIVE_LOOKBACK)state.live=freshPass(c,state,state.end);
         else state.liveSyncedAt=state.end;
       } else if(c.exchange==='Binance'&&options.spotAuto===true&&state.discoverSpot===undefined&&!options.spotDiscoveryAt) {
         state.discoverSpot=true;state.stream=0;delete state.start;delete state.cursor;
+      }
+      if(repairRequired&&state.pnlAuditV2===undefined) {
+        state.pnlAuditV2=true;state.stream=0;state.effectiveStart=c.start;delete state.start;delete state.cursor;
+        if(!state.live)state.live=freshPass(c,state,Date.now());
       }
       const now=Date.now();
       if(!state.live&&now-Number(state.liveSyncedAt||c.synced||state.end)>=SYNC_INTERVAL)state.live=freshPass(c,state,now);
@@ -78,6 +83,7 @@ export function createWorker(db,key,adapterFactory=createAdapter) {
         }
         if(state.discoverSpot){options.spotDiscoveryAt=Date.now();db.prepare('UPDATE connections SET options=? WHERE id=?').run(JSON.stringify(options),c.id);}
         if(state.binanceFuturesBackfill){options.futuresTradesBackfillAt=Date.now();db.prepare('UPDATE connections SET options=? WHERE id=?').run(JSON.stringify(options),c.id);}
+        if(state.pnlAuditV2){options.pnlAuditV2At=Date.now();db.prepare('UPDATE connections SET options=? WHERE id=?').run(JSON.stringify(options),c.id);}
         const synced=Math.max(Number(c.synced||0),Number(state.liveSyncedAt||0),state.end);
         db.prepare("UPDATE connections SET status='ready',synced=?,error=NULL WHERE id=?").run(synced,c.id);
         db.prepare("UPDATE jobs SET status='done',updated=? WHERE id=?").run(Date.now(),job.id);
