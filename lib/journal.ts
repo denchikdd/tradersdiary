@@ -1,4 +1,4 @@
-export type Trade={id:string;date:string;exchange:string;account:string;ticker:string;market:"spot"|"futures";settle:"USDT"|"USDC";gross:number;fee:number;funding:number};
+export type Trade={id:string;connectionId?:string;date:string;exchange:string;account:string;ticker:string;market:"spot"|"futures";settle:"USDT"|"USDC";gross:number;fee:number;funding:number};
 export const dateKey=(d:Date)=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
 export const sum=(rows:Trade[])=>rows.reduce((s,t)=>s+t.gross-t.fee+t.funding,0);
 export const money=(cents:number)=>`${cents>0?"+":cents<0?"−":""}${(Math.abs(cents)/100).toLocaleString("ru-RU",{minimumFractionDigits:2,maximumFractionDigits:2})} $`;

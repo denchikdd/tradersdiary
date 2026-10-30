@@ -118,6 +118,15 @@ test('Aster discovers traded symbols and imports private executions for chart re
   assert.equal(await adapter.prepare(),true);assert.deepEqual(options.asterSymbols,['AKEUSDT']);assert(adapter.streams(Date.now()).some(v=>v.id==='trades:AKEUSDT'));
   const page=await adapter.page('trades:AKEUSDT',1759990000000,1760010000000);assert.equal(page.events[0].kind,'fill');assert.equal(page.events[0].raw.price,'1.02');assert(calls.some(v=>v.includes('symbol=AKEUSDT')));
 });
+test('Aster income history follows the official paginated endpoint',async()=>{
+  const pages=[];
+  const adapter=createAdapter('Aster',{apiKey:'0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf',secret:'0x0000000000000000000000000000000000000000000000000000000000000001'},{asterDiscoveryAt:Date.now()},async url=>{
+    const page=Number(new URL(String(url)).searchParams.get('page'));pages.push(page);
+    return new Response(JSON.stringify({rows:[{tranId:`p${page}`,time:1760000000000+page,incomeType:'REALIZED_PNL',symbol:'AKEUSDT',asset:'USDT',income:String(page)}],hasMore:page===1}));
+  });
+  const first=await adapter.page('income',1759990000000,1760010000000),second=await adapter.page('income',1759990000000,1760010000000,first.next);
+  assert.deepEqual(pages,[1,2]);assert.equal(first.next,'2');assert.equal(second.next,null);assert.equal(second.events[0].gross,'2.000000000000');
+});
 test('all requested exchange adapters are enabled and sign read requests',async()=>{
   const expected=['Gate.io','Bitget','Aster','KuCoin','MEXC','Lighter'];assert(expected.every(id=>catalog.find(v=>v.id===id)?.enabled));
   const cases=[
@@ -158,6 +167,12 @@ test('Gate futures ledger signs and requests each supported type separately',asy
   assert.equal(parsed.searchParams.has('page'),false);
   assert.equal(init.headers.SIGN,createHmac('sha512',credentials.secret).update(`GET\n${parsed.pathname}\n${rawQuery}\n${bodyHash}\n${init.headers.Timestamp}`).digest('hex'));
 });
+test('Gate futures ledger walks backward instead of truncating a full page',async()=>{
+  const calls=[];
+  const adapter=createAdapter('Gate.io',{apiKey:'gate-key',secret:'gate-secret'},{},async(url)=>{calls.push(new URL(String(url)));return new Response(JSON.stringify(calls.length===1?Array.from({length:1000},(_,i)=>({id:String(i+1),time:2000-i/1000,type:'fee',change:'-0.01',contract:'BTC_USDT'})):[]));});
+  const first=await adapter.page('futures:fee',1000*1000,3000*1000-1),second=await adapter.page('futures:fee',1000*1000,3000*1000-1,first.next);
+  assert.equal(first.next,'1999');assert.equal(first.events.length,1000);assert.equal(first.events[0].fee,'0.010000000000');assert.equal(calls[1].searchParams.get('to'),'1999');assert.equal(second.next,null);
+});
 test('Bitget automatically switches UTA accounts to v3 assets and fills',async()=>{
   const options={},calls=[];
   const adapter=createAdapter('Bitget',{apiKey:'bitget-key',secret:'bitget-secret',passphrase:'pass'},options,async(url,init)=>{
@@ -165,17 +180,25 @@ test('Bitget automatically switches UTA accounts to v3 assets and fills',async()
     if(url.includes('/api/v2/'))return new Response(JSON.stringify({code:'40085',msg:'Unified Account mode'}),{status:400});
     if(url.includes('/api/v3/account/info'))return new Response(JSON.stringify({code:'00000',data:{permType:'read-only',permissions:['uta_mgt','uta_trade']}}));
     if(url.includes('/api/v3/account/assets'))return new Response(JSON.stringify({code:'00000',data:{accountEquity:'125.50',assets:[]}}));
-    if(url.includes('/api/v3/trade/fills'))return new Response(JSON.stringify({code:'00000',data:{list:[{execId:'e1',category:'USDT-FUTURES',symbol:'BTCUSDT',createdTime:'1750141421721',execPnl:'4.5',feeDetail:[{feeCoin:'USDT',fee:'0.25'}]}],cursor:''}}));
+    if(url.includes('/api/v3/trade/fills'))return new Response(JSON.stringify({code:'00000',data:{list:[{execId:'e1',category:'USDT-FUTURES',symbol:'BTCUSDT',createdTime:'1750141421721',execPnl:'4.5',feeDetail:[{feeCoin:'USDT',fee:'0.25'},{feeCoin:'USDT',fee:'0.05'}]}],cursor:''}}));
     throw new Error(`Unexpected URL ${url}`);
   });
   await adapter.verify();
   assert.equal(options.accountMode,'uta');
   assert(adapter.streams(Date.now()).some(v=>v.id==='uta-fills:USDT-FUTURES'));
   const page=await adapter.page('uta-fills:USDT-FUTURES',Date.now()-86400000,Date.now());
-  assert.deepEqual(page.events.map(v=>v.kind),['fill','pnl']);
+  assert.deepEqual(page.events.map(v=>v.kind),['fill','pnl','pnl','pnl']);
   assert.equal(page.events[1].gross,'4.500000000000');
-  assert.equal(page.events[1].fee,'0.250000000000');
+  assert.equal(decimal(page.events.slice(2).reduce((total,v)=>total+units(v.fee),0n)),'0.300000000000');
   assert(calls.every(v=>v.init.headers['Content-Type']==='application/json'));
+});
+test('Bitget Classic maps close PnL, the fee field and funding bills',async()=>{
+  const adapter=createAdapter('Bitget',{apiKey:'bitget-key',secret:'bitget-secret',passphrase:'pass'},{accountMode:'classic'},async()=>new Response(JSON.stringify({code:'00000',data:{bills:[
+    {billId:'1',symbol:'BTCUSDT',amount:'5',fee:'-0.2',businessType:'close_long',coin:'USDT',cTime:'1760000000000'},
+    {billId:'2',symbol:'BTCUSDT',amount:'-0.1',fee:'0',businessType:'contract_settle_fee',coin:'USDT',cTime:'1760000000001'},
+  ],endId:'2'}})));
+  const page=await adapter.page('bills:USDT-FUTURES',1759990000000,1760010000000);
+  assert.equal(page.events[0].gross,'5.000000000000');assert.equal(page.events[0].fee,'0.200000000000');assert.equal(page.events[0].currency,'USDT');assert.equal(page.events[1].funding,'-0.100000000000');
 });
 test('Bitget accepts alternate read-only spelling returned for a UTA key',async()=>{
   const options={};
@@ -215,6 +238,16 @@ test('worker refreshes after five minutes and rotates long imports between excha
   assert.equal(db.prepare('SELECT count(*) AS n FROM snapshots').get().n,2);
   await worker.stop();db.close();
 });
+test('worker refreshes recent PnL before a long historical import finishes',async()=>{
+  const db=openDatabase(':memory:'),key=randomBytes(32),id=addConnection(db,key),now=Date.now();
+  db.prepare('UPDATE connections SET start=? WHERE id=?').run(now-30*86400000,id);enqueue(db,id);
+  const pages=[];
+  const factory=()=>({streams:()=>[{id:'ledger',start:0,window:3*86400000}],page:async(_stream,start,end)=>{pages.push({start,end});return {events:[{id:'recent',time:now,kind:'pnl',market:'futures',symbol:'BTCUSDT',currency:'USDT',gross:'1',raw:{}}],next:null};},snapshot:async()=>({wallet:[]})});
+  const worker=createWorker(db,key,factory);await worker.tick();await worker.tick();
+  const connection=db.prepare('SELECT status,synced FROM connections WHERE id=?').get(id),state=JSON.parse(db.prepare('SELECT checkpoint FROM jobs WHERE connection_id=?').get(id).checkpoint);
+  assert.equal(pages.length,1);assert(pages[0].start>=now-2*86400000-1000);assert(connection.synced>=now-1000);assert.equal(connection.status,'syncing');assert.equal(state.stream,0);assert.equal(state.live,undefined);
+  await worker.stop();db.close();
+});
 test('HTTP auth, CSRF, encrypted storage, no returned credentials, logout, dedup and USD totals',async()=>{
   const db=openDatabase(':memory:'),key=randomBytes(32),setupToken='setup-token-long-enough-for-tests';
   const server=createServer();await new Promise(r=>server.listen(0,'127.0.0.1',r));const origin=`http://127.0.0.1:${server.address().port}`;
@@ -236,7 +269,7 @@ test('HTTP auth, CSRF, encrypted storage, no returned credentials, logout, dedup
     assert(!db.prepare('SELECT secret FROM connections').get().secret.includes(credentials.secret));
     const e={id:'a',time:Date.parse('2026-09-16T12:00:00Z'),kind:'pnl',market:'futures',symbol:'BTCUSDT',currency:'USDT',gross:'100.25',fee:'0.25',funding:'-1',raw:{}};
     savePage(db,id,'ledger',[e,{...e,id:'deposit',kind:'transfer',gross:'10000'}],1,{});
-    const result=await (await call('/journal?from=2026-09-01&to=2026-09-30')).json();assert.equal(result.rows.length,1);assert.equal(result.rows[0].gross-result.rows[0].fee+result.rows[0].funding,9900);
+    const result=await (await call('/journal?from=2026-09-01&to=2026-09-30')).json();assert.equal(result.rows.length,1);assert.equal(result.rows[0].gross-result.rows[0].fee+result.rows[0].funding,9900);assert.equal(result.rows[0].connectionId,id);
     const allTime=await call('/journal?scope=all');assert.equal(allTime.status,200);assert.equal((await allTime.json()).rows.length,1);
     const emptyNote=await (await call('/notes/2026-09-16')).json();assert.equal(emptyNote.note,'');assert.deepEqual(emptyNote.images,[]);
     assert.equal((await call('/notes/2026-09-16',{note:'Хороший день https://example.com/review'})).status,200);

@@ -4,6 +4,23 @@ import { enqueue, savePage } from './database.mjs';
 
 export const SYNC_INTERVAL = 5*60*1000;
 const SNAPSHOT_INTERVAL = 5*60*1000;
+const LIVE_LOOKBACK = 2*DAY;
+
+function liveStreams(exchange,streams) {
+  // Keep the five-minute pass focused on sources that can change realised PnL
+  // or reconstruct a futures trade. Spot executions are still loaded by the
+  // historical pass, but cannot block a fresh derivatives result.
+  if(exchange==='Binance')return streams.filter(v=>v.id==='income'||v.id.startsWith('futures:'));
+  if(exchange==='OKX')return streams.filter(v=>v.id!=='fills:SPOT');
+  if(exchange==='MEXC'||exchange==='Gate.io')return streams.filter(v=>v.id.startsWith('futures:'));
+  if(exchange==='Bitget')return streams.filter(v=>!['uta-fills:SPOT','uta-fills:MARGIN'].includes(v.id));
+  return streams;
+}
+
+function freshPass(connection,state,end) {
+  const previous=Number(state.liveSyncedAt||connection.synced||end);
+  return {end,stream:0,effectiveStart:Math.max(connection.start,previous-LIVE_LOOKBACK)};
+}
 
 export function createWorker(db,key,adapterFactory=createAdapter) {
   let busy=false,stopped=false,timer;
@@ -33,30 +50,45 @@ export function createWorker(db,key,adapterFactory=createAdapter) {
       if(!state.end) {
         state.end=Date.now();state.stream=0;state.binanceFuturesBackfill=c.exchange==='Binance'&&!options.futuresTradesBackfillAt;state.effectiveStart=state.binanceFuturesBackfill?Math.max(c.start,state.end-89*DAY):c.synced?Math.max(c.start,c.synced-2*DAY):c.start;
         state.discoverSpot=c.exchange==='Binance'&&options.spotAuto===true&&(!options.spotDiscoveryAt||Date.now()-options.spotDiscoveryAt>7*DAY);
+        // A long first import must not hide today's trades until years of old
+        // pages have finished. Short imports already are their own live pass.
+        if(c.synced===null&&state.effectiveStart<state.end-LIVE_LOOKBACK)state.live=freshPass(c,state,state.end);
+        else state.liveSyncedAt=state.end;
       } else if(c.exchange==='Binance'&&options.spotAuto===true&&state.discoverSpot===undefined&&!options.spotDiscoveryAt) {
         state.discoverSpot=true;state.stream=0;delete state.start;delete state.cursor;
       }
       const now=Date.now();
+      if(!state.live&&now-Number(state.liveSyncedAt||c.synced||state.end)>=SYNC_INTERVAL)state.live=freshPass(c,state,now);
       if(!state.snapshotAt||now-state.snapshotAt>=SNAPSHOT_INTERVAL) {
         const snapshot=await adapter.snapshot();
         state.snapshotAt=now;
         db.prepare('INSERT INTO snapshots VALUES(?,?,?) ON CONFLICT(connection_id) DO UPDATE SET time=excluded.time,data=excluded.data').run(c.id,now,JSON.stringify(snapshot));
         db.prepare('UPDATE jobs SET checkpoint=?,updated=? WHERE id=?').run(JSON.stringify(state),now,job.id);
       }
-      const streams=adapter.streams(state.end,state);
-      if(state.stream>=streams.length) {
+      const isLive=!!state.live,pass=isLive?state.live:state;
+      const available=adapter.streams(pass.end,isLive?{...state,discoverSpot:false}:state);
+      const streams=isLive?liveStreams(c.exchange,available):available;
+      if(pass.stream>=streams.length) {
+        if(isLive) {
+          const synced=pass.end;state.liveSyncedAt=synced;delete state.live;
+          db.prepare('UPDATE connections SET synced=CASE WHEN synced IS NULL OR synced<? THEN ? ELSE synced END,error=NULL WHERE id=?').run(synced,synced,c.id);
+          savePage(db,c.id,'__live__',[],job.id,state);
+          db.prepare("UPDATE jobs SET status='queued',attempts=0,updated=? WHERE id=?").run(Date.now(),job.id);
+          return;
+        }
         if(state.discoverSpot){options.spotDiscoveryAt=Date.now();db.prepare('UPDATE connections SET options=? WHERE id=?').run(JSON.stringify(options),c.id);}
         if(state.binanceFuturesBackfill){options.futuresTradesBackfillAt=Date.now();db.prepare('UPDATE connections SET options=? WHERE id=?').run(JSON.stringify(options),c.id);}
-        db.prepare("UPDATE connections SET status='ready',synced=?,error=NULL WHERE id=?").run(state.end,c.id);
+        const synced=Math.max(Number(c.synced||0),Number(state.liveSyncedAt||0),state.end);
+        db.prepare("UPDATE connections SET status='ready',synced=?,error=NULL WHERE id=?").run(synced,c.id);
         db.prepare("UPDATE jobs SET status='done',updated=? WHERE id=?").run(Date.now(),job.id);
         return;
       }
-      const stream=streams[state.stream];
-      const start=state.start??Math.max(state.effectiveStart,stream.start);
-      const end=Math.min(start+stream.window-1,state.end);
-      if(start>state.end) {state.stream++;delete state.start;delete state.cursor;savePage(db,c.id,stream.id,[],job.id,state);}
+      const stream=streams[pass.stream];
+      const start=pass.start??Math.max(pass.effectiveStart,stream.start);
+      const end=Math.min(start+stream.window-1,pass.end);
+      if(start>pass.end) {pass.stream++;delete pass.start;delete pass.cursor;savePage(db,c.id,stream.id,[],job.id,state);}
       else {
-        const page=await adapter.page(stream.id,start,end,state.cursor);
+        const page=await adapter.page(stream.id,start,end,pass.cursor);
         if(page.discoveredSymbol&&!options.spotSymbols.includes(page.discoveredSymbol)) {
           options.spotSymbols.push(page.discoveredSymbol);options.spotSymbols.sort();
           db.prepare('UPDATE connections SET options=? WHERE id=?').run(JSON.stringify(options),c.id);
@@ -65,10 +97,10 @@ export function createWorker(db,key,adapterFactory=createAdapter) {
           const symbols=new Set(options.futuresSymbols||[]);for(const symbol of page.discoveredFuturesSymbols)symbols.add(symbol);
           options.futuresSymbols=[...symbols].sort();db.prepare('UPDATE connections SET options=? WHERE id=?').run(JSON.stringify(options),c.id);
         }
-        if(page.next && page.next===state.cursor) throw new Error('Биржа повторила курсор. Синхронизация остановлена без потери данных.');
-        if(page.next) {state.start=start;state.cursor=page.next;}
-        else if(end>=state.end) {state.stream++;delete state.start;delete state.cursor;}
-        else {state.start=end+1;delete state.cursor;}
+        if(page.next && page.next===pass.cursor) throw new Error('Биржа повторила курсор. Синхронизация остановлена без потери данных.');
+        if(page.next) {pass.start=start;pass.cursor=page.next;}
+        else if(end>=pass.end) {pass.stream++;delete pass.start;delete pass.cursor;}
+        else {pass.start=end+1;delete pass.cursor;}
         savePage(db,c.id,stream.id,page.events,job.id,state);
       }
       db.prepare("UPDATE jobs SET status='queued',attempts=0,updated=? WHERE id=?").run(Date.now(),job.id);

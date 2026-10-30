@@ -173,7 +173,7 @@ export function createApi(db,key,{origin,secure,setupToken,adapterFactory=create
         for(const e of events) {
           if(!['USDT','USDC'].includes(e.currency)){unvalued++;continue;}
           const day=new Date(e.time).toISOString().slice(0,10),id=[e.connection_id,day,e.symbol,e.currency].join(':');
-          const row=groups.get(id)||{id,date:day,exchange:e.exchange,account:e.label,ticker:e.symbol.replace(/[-/]?(USDT|USDC)(-SWAP)?$/,'')||'Без тикера',market:e.market,settle:e.currency,gross:0n,fee:0n,funding:0n};
+          const row=groups.get(id)||{id,connectionId:e.connection_id,date:day,exchange:e.exchange,account:e.label,ticker:e.symbol.replace(/[-/]?(USDT|USDC)(-SWAP)?$/,'')||'Без тикера',market:e.market,settle:e.currency,gross:0n,fee:0n,funding:0n};
           row.gross+=units(e.gross);row.fee+=units(e.fee);row.funding+=units(e.funding);groups.set(id,row);
         }
         const rows=[...groups.values()].map(r=>({...r,gross:cents(decimal(r.gross)),fee:cents(decimal(r.fee)),funding:cents(decimal(r.funding))}));
@@ -203,7 +203,7 @@ export function createApi(db,key,{origin,secure,setupToken,adapterFactory=create
         return send(res,200,{hasMore:rows.length>200,rows:rows.slice(0,200).map(e=>{const v=JSON.parse(e.raw),rawFee=v.execFee||v.commission||v.fee||'0',fee=e.exchange==='OKX'?decimal(-units(rawFee)):rawFee;return {id:e.external_id,time:e.time,exchange:e.exchange,account:e.label,symbol:e.symbol,market:e.market,side:v.side||(v.isBuyer?'Buy':'Sell'),quantity:v.execQty||v.qty||v.fillSz||v.sz||'',price:v.execPrice||v.price||v.fillPx||v.px||'',fee,currency:e.currency};})});
       }
       if(method==='GET'&&path==='/balances') {
-        const accounts=db.prepare('SELECT c.exchange,c.label,s.time,s.data FROM snapshots s JOIN connections c ON c.id=s.connection_id ORDER BY c.created').all().map(s=>({...s,...normalizedCapital(s.exchange,JSON.parse(s.data))})).filter(v=>v.equityUsd!==undefined);
+        const accounts=db.prepare('SELECT c.id AS connectionId,c.exchange,c.label,s.time,s.data FROM snapshots s JOIN connections c ON c.id=s.connection_id ORDER BY c.created').all().map(s=>({...s,...normalizedCapital(s.exchange,JSON.parse(s.data))})).filter(v=>v.equityUsd!==undefined);
         const total=accounts.reduce((n,v)=>n+units(v.equityUsd),0n);
         return send(res,200,{totalEquityUsd:decimal(total),updatedAt:accounts.length?Math.min(...accounts.map(v=>v.time)):null,accounts:accounts.map(({data,...v})=>v)});
       }
