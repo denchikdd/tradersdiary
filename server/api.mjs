@@ -3,6 +3,7 @@ import { encrypt,digest,passwordHash,passwordMatches,cents,units,decimal } from 
 import { enqueue } from './database.mjs';
 import { catalog,createAdapter,normalizedCapital } from './exchanges.mjs';
 import { buildTrades,marketCandles,normalizeExecution,tickerOf } from './trade-details.mjs';
+import { krakenSpotPnl } from './spot-pnl.mjs';
 
 class ApiError extends Error { constructor(status,message){super(message);this.status=status;} }
 export function createApi(db,key,{origin,secure,setupToken,adapterFactory=createAdapter}) {
@@ -168,16 +169,18 @@ export function createApi(db,key,{origin,secure,setupToken,adapterFactory=create
       if(method==='GET'&&path==='/journal') {
         const allTime=url.searchParams.get('scope')==='all',from=allTime?0:Date.parse(url.searchParams.get('from')),to=allTime?Date.now():Date.parse(url.searchParams.get('to'));
         if(!Number.isFinite(from)||!Number.isFinite(to)||to<from||(!allTime&&to-from>370*86400000))throw new ApiError(400,'Период не должен превышать год.');
-        const events=db.prepare(`SELECT e.*,c.exchange,c.label FROM events e JOIN connections c ON c.id=e.connection_id WHERE time>=? AND time<? AND kind='pnl' ORDER BY time`).all(from,to+86400000);
-        const groups=new Map();let unvalued=0;
+        const direct=db.prepare(`SELECT e.*,c.exchange,c.label FROM events e JOIN connections c ON c.id=e.connection_id WHERE time>=? AND time<? AND kind='pnl' ORDER BY time`).all(from,to+86400000);
+        const krakenFills=db.prepare(`SELECT e.*,c.exchange,c.label FROM events e JOIN connections c ON c.id=e.connection_id WHERE c.exchange='Kraken' AND e.kind='fill' AND e.market='spot' AND e.time<? ORDER BY e.time,e.external_id`).all(to+86400000);
+        const spot=krakenSpotPnl(krakenFills,{from}),events=[...direct,...spot.events].sort((a,b)=>a.time-b.time);
+        const groups=new Map();let unvalued=spot.otherQuotes;
         for(const e of events) {
-          if(!['USDT','USDC'].includes(e.currency)){unvalued++;continue;}
+          if(!['USD','USDT','USDC'].includes(e.currency)){unvalued++;continue;}
           const day=new Date(e.time).toISOString().slice(0,10),id=[e.connection_id,day,e.symbol,e.currency].join(':');
-          const row=groups.get(id)||{id,connectionId:e.connection_id,date:day,exchange:e.exchange,account:e.label,ticker:e.symbol.replace(/[-/]?(USDT|USDC)(-SWAP)?$/,'')||'Без тикера',market:e.market,settle:e.currency,gross:0n,fee:0n,funding:0n};
+          const row=groups.get(id)||{id,connectionId:e.connection_id,date:day,exchange:e.exchange,account:e.label,ticker:tickerOf(e.symbol)||'Без тикера',market:e.market,settle:e.currency,gross:0n,fee:0n,funding:0n};
           row.gross+=units(e.gross);row.fee+=units(e.fee);row.funding+=units(e.funding);groups.set(id,row);
         }
         const rows=[...groups.values()].map(r=>({...r,gross:cents(decimal(r.gross)),fee:cents(decimal(r.fee)),funding:cents(decimal(r.funding))}));
-        return send(res,200,{rows,unvalued,notice:'Реализованный PnL фьючерсов. USDT/USDC приняты за 1 USD. Spot сохранён как исполнения, но прибыль не рассчитана без проверенной себестоимости. Процент PnL считается от текущего общего капитала всех подключённых счетов.'});
+        return send(res,200,{rows,unvalued,spotIncomplete:spot.incomplete,notice:'Реализованный PnL фьючерсов и Hyperliquid Spot берётся из данных биржи. Kraken Spot рассчитывается FIFO только для сделок с полностью известной себестоимостью. USD/USDT/USDC приняты за 1 USD. Процент PnL считается от текущего общего капитала всех подключённых счетов.'});
       }
       if(method==='GET'&&path==='/trade-details') {
         const date=url.searchParams.get('date'),ticker=String(url.searchParams.get('ticker')||'').toUpperCase(),exchange=url.searchParams.get('exchange')||'all';

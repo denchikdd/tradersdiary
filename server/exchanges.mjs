@@ -1,4 +1,4 @@
-import { createHmac } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 import { decimal, units } from './security.mjs';
 import { createExtraAdapter } from './exchanges-extra.mjs';
 
@@ -7,7 +7,8 @@ export const catalog = [
   { id:'Bybit', enabled:true, passphrase:false, notice:'Единый аккаунт UTA: исполнения spot/linear и журнал PnL за последние 2 года. Старый Classic Account не поддерживается.' },
   { id:'Binance', enabled:true, passphrase:false, notice:'USDⓈ-M: журнал доходов за доступные API 3 месяца. Spot-пары определяются и загружаются автоматически; первичный поиск может занять несколько минут.' },
   { id:'OKX', enabled:true, passphrase:true, notice:'Исполнения и финансовый журнал за последние 3 месяца. Для старой истории потребуется архив биржи.' },
-  { id:'Hyperliquid', enabled:true, address:true, notice:'Только публичный адрес кошелька. Баланс берётся из объединённого Portfolio; история perpetuals — из публичного API. Приватный ключ не нужен.' },
+  { id:'Hyperliquid', enabled:true, address:true, notice:'Perpetuals и Spot подключаются только по публичному адресу. Для Spot используется закрытый PnL из исполнений Hyperliquid; приватный ключ не нужен.' },
+  { id:'Kraken', enabled:true, passphrase:false, notice:'Kraken Spot. Включите только Query Funds, Query Open Orders & Trades и Query Closed Orders & Trades. Торговля, переводы и вывод должны быть отключены.' },
   { id:'Gate.io',enabled:true,notice:'Spot и USDT perpetuals. История биржи загружается доступными окнами API.' },
   { id:'Bitget',enabled:true,passphrase:true,notice:'Classic и UTA определяются автоматически. Для UTA включите только чтение UTA management и UTA trading; тип ключа должен быть Read-only, без Withdraw.' },
   { id:'Aster',enabled:true,notice:'Aster V3: адрес и приватный ключ отдельного API Wallet с разрешением Read. Не используйте приватный ключ основного кошелька.' },
@@ -26,8 +27,9 @@ export function createAdapter(exchange, credentials, options={}, fetchImpl=fetch
     let response;try{response=await fetchImpl(url,{method:'GET',redirect:'error',signal:AbortSignal.timeout(20000)});}catch{return null;}
     if(!response.ok)return null;try{return JSON.parse(await response.text());}catch{return null;}
   }
+  let krakenNonce=BigInt(Date.now())*1000n;
   async function request(path, params={}) {
-    await delay(fetchImpl === fetch ? (exchange==='Binance'?220:180) : 0);
+    await delay(fetchImpl === fetch ? (exchange==='Kraken'?1100:exchange==='Binance'?220:180) : 0);
     let url, init = {method:'GET',redirect:'error',signal:AbortSignal.timeout(20000),headers:{}};
     const query = new URLSearchParams(Object.entries(params).filter(([,v])=>v!==undefined).map(([k,v])=>[k,String(v)])).toString();
     const now=String(Date.now());
@@ -44,7 +46,13 @@ export function createAdapter(exchange, credentials, options={}, fetchImpl=fetch
       init.headers={'OK-ACCESS-KEY':credentials.apiKey,'OK-ACCESS-PASSPHRASE':credentials.passphrase,'OK-ACCESS-TIMESTAMP':timestamp,'OK-ACCESS-SIGN':hmac(credentials.secret,timestamp+'GET'+target,'base64')};
     } else if(exchange==='Hyperliquid') {
       url='https://api.hyperliquid.xyz/info';
-      init={...init,method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:path,user:credentials.address,...params})};
+      const publicInfo=['spotMeta','spotMetaAndAssetCtxs','allMids'].includes(path);
+      init={...init,method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:path,...(publicInfo?{}:{user:credentials.address}),...params})};
+    } else if(exchange==='Kraken') {
+      const nonce=String(++krakenNonce),postData=new URLSearchParams({nonce,...Object.fromEntries(Object.entries(params).filter(([,v])=>v!==undefined).map(([k,v])=>[k,String(v)]))}).toString();
+      const message=Buffer.concat([Buffer.from(path),createHash('sha256').update(nonce+postData).digest()]);
+      url='https://api.kraken.com'+path;
+      init={...init,method:'POST',headers:{'API-Key':credentials.apiKey,'API-Sign':createHmac('sha512',Buffer.from(credentials.secret,'base64')).update(message).digest('base64'),'Content-Type':'application/x-www-form-urlencoded'},body:postData};
     } else throw new ExchangeError('Биржа пока не поддерживается.');
     let response;
     try { response=await fetchImpl(url,init); } catch { throw new ExchangeError('Биржа недоступна или истекло время ожидания.',true); }
@@ -55,6 +63,11 @@ export function createAdapter(exchange, credentials, options={}, fetchImpl=fetch
       body=JSON.parse(await response.text(),(_key,value,context)=>
         typeof value==='number' && Number.isInteger(value) && !Number.isSafeInteger(value) ? context.source : value);
     } catch { throw new ExchangeError('Некорректный ответ биржи.',true); }
+    if(exchange==='Kraken') {
+      const errors=Array.isArray(body.error)?body.error.filter(Boolean):[];
+      if(errors.length){const detail=errors.join(', ').replace(/[\r\n]+/g,' ').slice(0,180);throw new ExchangeError(`Ошибка Kraken: ${detail}` ,/rate limit|service|temporarily|unavailable/i.test(detail));}
+      return body.result;
+    }
     const code=exchange==='Bybit'?body.retCode:exchange==='OKX'?body.code:exchange==='Binance'?body.code:0;
     if(code!==undefined && Number(code)!==0) {
       const detail=String(body.retMsg||body.msg||'').replace(/[\r\n]+/g,' ').slice(0,180);
@@ -73,9 +86,26 @@ export function createAdapter(exchange, credentials, options={}, fetchImpl=fetch
     } else if(exchange==='OKX') {
       const [v]=await request('/api/v5/account/config');
       if(!v || v.perm!=='read_only') throw new ExchangeError('Нужен ключ OKX только с разрешением Read.');
+    } else if(exchange==='Kraken') {
+      const info=await request('/0/private/GetApiKeyInfo'),permissions=new Set(info?.permissions||[]),required=['query-funds','query-open-trades','query-closed-trades'],write=['add-funds','withdraw-funds','earn-funds','modify-trades','close-trades','add-withdraw-address','update-withdraw-address'];
+      if(required.some(permission=>!permissions.has(permission)))throw new ExchangeError('Для Kraken нужны только права Query Funds, Query Open Orders & Trades и Query Closed Orders & Trades.');
+      if(write.some(permission=>permissions.has(permission)))throw new ExchangeError('У ключа Kraken найдены права на изменение счёта. Оставьте только три права чтения.');
+      await request('/0/private/Balance');
     } else await request('clearinghouseState');
   }
   async function prepare() {
+    if(exchange==='Hyperliquid') {
+      const meta=await request('spotMeta'),tokens=new Map((meta?.tokens||[]).map(v=>[Number(v.index),String(v.name||v.fullName||v.index).toUpperCase()])),names={};
+      for(const pair of meta?.universe||[]){const base=tokens.get(Number(pair.tokens?.[0]))||'',quote=tokens.get(Number(pair.tokens?.[1]))||'USDC';if(pair.name&&base)names[String(pair.name)]=`${base==='XBT'?'BTC':base}${quote}`;}
+      if(JSON.stringify(names)!==JSON.stringify(options.hyperliquidSpotNames||{})){options.hyperliquidSpotNames=names;return true;}return false;
+    }
+    if(exchange==='Kraken') {
+      if(options.krakenPairsVersion===1)return false;
+      const info=await publicJson('https://api.kraken.com/0/public/AssetPairs'),pairs={};
+      for(const [key,value] of Object.entries(info?.result||{})){const parts=String(value.wsname||value.altname||key).toUpperCase().split('/'),base=(parts[0]||'').replace(/^X(?=[A-Z]{3}$)/,'').replace('XBT','BTC').replace('XDG','DOGE'),quote=(parts[1]||'USD').replace(/^Z(?=[A-Z]{3}$)/,'');pairs[key]={symbol:`${base}${quote}`,quote};if(value.altname)pairs[value.altname]={symbol:`${base}${quote}`,quote};}
+      if(!Object.keys(pairs).length)throw new ExchangeError('Kraken не отдал каталог торговых пар. Повторим автоматически.',true);
+      options.krakenPairs=pairs;options.krakenPairsVersion=1;return true;
+    }
     if(exchange!=='Binance')return false;
     let changed=false;
     if(options.spotAuto!==true){options.spotAuto=true;changed=true;}
@@ -97,6 +127,7 @@ export function createAdapter(exchange, credentials, options={}, fetchImpl=fetch
       const [wallet,spot,portfolio]=await Promise.all([request('clearinghouseState'),request('spotClearinghouseState'),request('portfolio')]);
       return {wallet,spot,portfolio};
     }
+    if(exchange==='Kraken') {const [balance,trade]=await Promise.all([request('/0/private/Balance'),request('/0/private/TradeBalance',{asset:'ZUSD'})]);return {equityUsd:trade?.eb||'0',availableUsd:trade?.mf||null,balance,trade,scope:'spot-equivalent-usd'};}
     const result={};
     result.spot=await request('/api/v3/account');
     if(options.futures!==false) result.futures=await request('/fapi/v3/account');
@@ -123,6 +154,7 @@ export function createAdapter(exchange, credentials, options={}, fetchImpl=fetch
       ...(options.spotSymbols||[]).map(symbol=>({id:'spot:'+symbol,start:Date.UTC(2017,6,1),window:DAY})),
     ];
     if(exchange==='OKX') return ['fills:SPOT','fills:SWAP','bills:SWAP'].map(id=>({id,start:now-89*DAY,window:7*DAY}));
+    if(exchange==='Kraken') return [{id:'spot',start:Date.UTC(2017,0,1),window:30*DAY}];
     return [{id:'fills',start:0,window:30*DAY},{id:'funding',start:0,window:30*DAY}];
   }
   async function page(stream,start,end,cursor) {
@@ -160,6 +192,11 @@ export function createAdapter(exchange, credentials, options={}, fetchImpl=fetch
       next=rows.length===100?String(rows[rows.length-1].billId):null;
       return {events:rows.map(v=>okxEvent(v,type,market)),next};
     }
+    if(exchange==='Kraken') {
+      const offset=Number(cursor||0),result=await request('/0/private/TradesHistory',{type:'all',trades:false,consolidate_taker:false,start:Math.floor(start/1000),end:Math.floor(end/1000),ofs:offset,limit:50}),entries=Object.entries(result?.trades||{}),count=Number(result?.count||entries.length);
+      next=offset+entries.length<count?String(offset+entries.length):null;
+      return {events:entries.map(([id,v])=>{const pair=options.krakenPairs?.[v.pair]||{symbol:String(v.pair||'').replace(/[^A-Z0-9]/gi,''),quote:/USDT$/i.test(v.pair||'')?'USDT':/USDC$/i.test(v.pair||'')?'USDC':'USD'};return {id,time:Math.round(Number(v.time)*1000),kind:'fill',market:'spot',symbol:pair.symbol,currency:pair.quote,gross:'0',fee:'0',funding:'0',raw:{...v,id,quote:pair.quote}};}),next};
+    }
     rows=await request(stream==='fills'?'userFillsByTime':'userFunding',{startTime:cursor?Number(cursor):start,endTime:end,...(stream==='fills'?{aggregateByTime:false}:{})});
     // Hyperliquid has time pagination only: replay boundary; refuse silent truncation.
     const limit=stream==='fills'?2000:500;
@@ -168,7 +205,8 @@ export function createAdapter(exchange, credentials, options={}, fetchImpl=fetch
       if(last<=Number(cursor||start)) throw new ExchangeError('Слишком много записей с одной меткой времени. Нужен архив биржи.');
       next=String(last);
     }
-    return {events:rows.map(v=>hyperliquidEvent(v,stream)),next:next||null};
+    const events=[];for(const value of rows){const fill=hyperliquidEvent(value,stream,options.hyperliquidSpotNames);events.push(fill);if(stream==='fills'&&fill.market==='spot')events.push({...fill,id:`pnl:${fill.id}`,kind:'pnl',gross:value.closedPnl||'0',fee:value.fee||'0',raw:{sourceTid:value.tid,closedPnl:value.closedPnl||'0',fee:value.fee||'0',feeToken:value.feeToken||'USDC',spotPnl:true}});}
+    return {events,next:next||null};
   }
   return {verify,prepare,snapshot,streams,page,options};
 }
@@ -214,8 +252,8 @@ export function okxEvent(v,type,market) {
   }
   return e;
 }
-export function hyperliquidEvent(v,type) {
+export function hyperliquidEvent(v,type,spotNames={}) {
   const funding=type==='funding', spot=!funding&&String(v.coin).startsWith('@');
-  return {id:funding?`${v.hash}:${v.delta.coin}`:String(v.tid),time:Number(v.time),kind:spot?'fill':'pnl',market:spot?'spot':'futures',symbol:funding?v.delta.coin:v.coin,currency:funding?'USDC':v.feeToken||'USDC',gross:funding?'0':v.closedPnl||'0',fee:funding?'0':v.fee||'0',funding:funding?v.delta.usdc||'0':'0',raw:v};
+  return {id:funding?`${v.hash}:${v.delta.coin}`:String(v.tid),time:Number(v.time),kind:spot?'fill':'pnl',market:spot?'spot':'futures',symbol:funding?v.delta.coin:(spotNames[v.coin]||v.coin),currency:funding?'USDC':v.feeToken||'USDC',gross:funding||spot?'0':v.closedPnl||'0',fee:funding||spot?'0':v.fee||'0',funding:funding?v.delta.usdc||'0':'0',raw:v};
 }
 

@@ -7,6 +7,7 @@ import { encrypt,decrypt,units,decimal,passwordHash,passwordMatches } from './se
 import { createApi } from './api.mjs';
 import { createWorker, SYNC_INTERVAL } from './worker.mjs';
 import { catalog,createAdapter,bybitEvent,binanceIncome,okxEvent,normalizedCapital } from './exchanges.mjs';
+import { krakenSpotPnl } from './spot-pnl.mjs';
 
 test('AES-GCM authenticates credentials, account identity and ciphertext',()=>{
   const key=randomBytes(32),secret={apiKey:'private-api-key',secret:'sensitive-secret'};
@@ -107,6 +108,38 @@ test('MEXC accepts a valid spot-only key when Futures API is unavailable',async(
   assert(calls[0].init.headers['X-MEXC-APIKEY']);
   assert(calls[1].init.headers.ApiKey);
 });
+test('Hyperliquid keeps spot executions and imports exchange-reported spot PnL',async()=>{
+  const options={},adapter=createAdapter('Hyperliquid',{address:'0x1111111111111111111111111111111111111111'},options,async(_url,init)=>{
+    const body=JSON.parse(init.body);
+    if(body.type==='spotMeta')return new Response(JSON.stringify({tokens:[{index:0,name:'USDC'},{index:150,name:'HYPE'}],universe:[{name:'@107',tokens:[150,0]}]}));
+    if(body.type==='userFillsByTime')return new Response(JSON.stringify([{coin:'@107',tid:7,time:1760000000000,closedPnl:'8.5',fee:'0.2',feeToken:'USDC',px:'20',sz:'1',side:'A'}]));
+    throw new Error(`Unexpected Hyperliquid call ${body.type}`);
+  });
+  assert.equal(await adapter.prepare(),true);const page=await adapter.page('fills',1759990000000,1760010000000);
+  assert.equal(page.events.length,2);assert.equal(page.events[0].kind,'fill');assert.equal(page.events[0].symbol,'HYPEUSDC');assert.equal(page.events[1].kind,'pnl');assert.equal(page.events[1].gross,'8.5');assert.equal(page.events[1].fee,'0.2');assert.equal(page.events[1].raw.spotPnl,true);assert.equal(page.events[1].raw.px,undefined);
+});
+test('Kraken signs read-only requests and imports paginated spot fills',async()=>{
+  const secret=Buffer.from('kraken-secret').toString('base64'),options={krakenPairsVersion:1,krakenPairs:{XXBTZUSD:{symbol:'BTCUSD',quote:'USD'}}},calls=[];
+  const adapter=createAdapter('Kraken',{apiKey:'kraken-key',secret},options,async(url,init)=>{
+    calls.push({url:String(url),init});
+    if(String(url).endsWith('/GetApiKeyInfo'))return new Response(JSON.stringify({error:[],result:{permissions:['query-funds','query-open-trades','query-closed-trades']}}));
+    if(String(url).endsWith('/Balance'))return new Response(JSON.stringify({error:[],result:{ZUSD:'10'}}));
+    if(String(url).endsWith('/TradesHistory'))return new Response(JSON.stringify({error:[],result:{count:1,trades:{TX1:{pair:'XXBTZUSD',time:1760000000,type:'buy',price:'100',cost:'100',fee:'0.1',vol:'1'}}}}));
+    throw new Error(`Unexpected Kraken call ${url}`);
+  });
+  await adapter.verify();const page=await adapter.page('spot',1759990000000,1760010000000);
+  assert.equal(page.events[0].symbol,'BTCUSD');assert.equal(page.events[0].currency,'USD');assert.equal(page.events[0].kind,'fill');assert.equal(page.next,null);
+  for(const call of calls){assert.equal(call.init.method,'POST');assert.equal(call.init.headers['API-Key'],'kraken-key');assert(call.init.headers['API-Sign']);assert(!call.init.body.includes('kraken-secret'));}
+});
+test('Kraken FIFO PnL excludes unknown opening inventory instead of guessing',()=>{
+  const base={connection_id:'c1',exchange:'Kraken',label:'Spot',market:'spot',kind:'fill',symbol:'BTCUSD',currency:'USD'};
+  const result=krakenSpotPnl([
+    {...base,external_id:'b1',time:1,raw:{type:'buy',vol:'1',cost:'100',fee:'1'}},
+    {...base,external_id:'s1',time:2,raw:{type:'sell',vol:'1',cost:'120',fee:'1'}},
+    {...base,external_id:'s2',time:3,raw:{type:'sell',vol:'1',cost:'130',fee:'1'}},
+  ]);
+  assert.equal(result.events.length,1);assert.equal(result.events[0].gross,'20.000000000000');assert.equal(result.events[0].fee,'2.000000000000');assert.equal(result.incomplete,1);
+});
 test('Aster discovers traded symbols and imports private executions for chart reconstruction',async()=>{
   const options={},calls=[];
   const adapter=createAdapter('Aster',{apiKey:'0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf',secret:'0x0000000000000000000000000000000000000000000000000000000000000001'},options,async url=>{
@@ -128,7 +161,7 @@ test('Aster income history follows the official paginated endpoint',async()=>{
   assert.deepEqual(pages,[1,2]);assert.equal(first.next,'2');assert.equal(second.next,null);assert.equal(second.events[0].gross,'2.000000000000');
 });
 test('all requested exchange adapters are enabled and sign read requests',async()=>{
-  const expected=['Gate.io','Bitget','Aster','KuCoin','MEXC','Lighter'];assert(expected.every(id=>catalog.find(v=>v.id===id)?.enabled));
+  const expected=['Gate.io','Bitget','Aster','Kraken','KuCoin','MEXC','Lighter'];assert(expected.every(id=>catalog.find(v=>v.id===id)?.enabled));
   const cases=[
     ['Gate.io',{apiKey:'key123',secret:'secret123'},{},[],h=>h.KEY&&h.SIGN],
     ['Bitget',{apiKey:'key123',secret:'secret123',passphrase:'pass'},{},{code:'00000',data:[]},h=>h['ACCESS-SIGN']&&h['ACCESS-PASSPHRASE']],

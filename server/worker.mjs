@@ -47,7 +47,7 @@ export function createWorker(db,key,adapterFactory=createAdapter) {
       const adapter=adapterFactory(c.exchange,decrypt(c.secret,key,c.id),options);
       if(adapter.prepare && await adapter.prepare()) db.prepare('UPDATE connections SET options=? WHERE id=?').run(JSON.stringify(options),c.id);
       const state=JSON.parse(job.checkpoint);
-      const repairRequired=['Aster','Gate.io','Bitget'].includes(c.exchange)&&!options.pnlAuditV2At;
+      const repairRequired=['Aster','Gate.io','Bitget','Hyperliquid'].includes(c.exchange)&&!options.pnlAuditV2At;
       if(!state.end) {
         state.end=Date.now();state.stream=0;state.pnlAuditV2=repairRequired;state.binanceFuturesBackfill=c.exchange==='Binance'&&!options.futuresTradesBackfillAt;state.effectiveStart=repairRequired?c.start:state.binanceFuturesBackfill?Math.max(c.start,state.end-89*DAY):c.synced?Math.max(c.start,c.synced-2*DAY):c.start;
         state.discoverSpot=c.exchange==='Binance'&&options.spotAuto===true&&(!options.spotDiscoveryAt||Date.now()-options.spotDiscoveryAt>7*DAY);
