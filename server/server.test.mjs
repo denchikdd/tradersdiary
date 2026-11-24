@@ -189,6 +189,38 @@ test('MEXC accepts a valid spot-only key when Futures API is unavailable',async(
   assert(calls[0].init.headers['X-MEXC-APIKEY']);
   assert(calls[1].init.headers.ApiKey);
 });
+test('MEXC Spot re-signs a rejected request using the exchange clock across worker pages',async()=>{
+  const credentials={apiKey:'spot-key',secret:'spot-secret'},clockSkew=-45000,calls=[];
+  const fetchSpot=async (input,init)=>{
+    const url=new URL(input);
+    calls.push(url.pathname);
+    if(url.pathname==='/api/v3/time') {
+      assert.equal(init.headers['X-MEXC-APIKEY'],undefined);
+      return Response.json({serverTime:Date.now()+clockSkew});
+    }
+    const [signed,signature]=url.search.slice(1).split('&signature=');
+    assert.equal(signature,createHmac('sha256',credentials.secret).update(signed).digest('hex'));
+    assert.equal(init.headers['X-MEXC-APIKEY'],credentials.apiKey);
+    const skew=Number(url.searchParams.get('timestamp'))-Date.now()-clockSkew;
+    if(skew>=1000||skew< -10000)return Response.json({code:700003},{status:400});
+    return Response.json([]);
+  };
+  const now=Date.now();
+  const options={futures:false};
+  await createAdapter('MEXC',credentials,options,fetchSpot).page('spot:BTCUSDT',now-10000,now);
+  await createAdapter('MEXC',credentials,options,fetchSpot).page('spot:ETHUSDT',now-10000,now);
+  assert.deepEqual(calls,['/api/v3/myTrades','/api/v3/time','/api/v3/myTrades','/api/v3/myTrades']);
+});
+test('MEXC Spot surfaces a second timestamp rejection without looping',async()=>{
+  let signedCalls=0;
+  const adapter=createAdapter('MEXC',{apiKey:'spot-key',secret:'spot-secret'},{futures:false},async url=>{
+    if(url.endsWith('/api/v3/time'))return Response.json({serverTime:Date.now()});
+    signedCalls++;
+    return Response.json({code:700003});
+  });
+  await assert.rejects(adapter.verify(),{code:700003,retryable:true});
+  assert.equal(signedCalls,2);
+});
 test('Hyperliquid keeps spot executions and imports exchange-reported spot PnL',async()=>{
   const options={},adapter=createAdapter('Hyperliquid',{address:'0x1111111111111111111111111111111111111111'},options,async(_url,init)=>{
     const body=JSON.parse(init.body);

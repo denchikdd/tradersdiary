@@ -3,6 +3,8 @@ import { Wallet } from 'ethers';
 import { decimal,units } from './security.mjs';
 const DAY=86400000,hmac=(algo,key,text,enc='hex')=>createHmac(algo,key).update(text).digest(enc);
 const MEXC_SPOT_PAGE_SIZE=100;
+const MEXC_API='https://api.mexc.com';
+const mexcClockOffsets=new WeakMap();
 class ExchangeError extends Error{constructor(message,retryable=false,details={}){super(message);this.name='ExchangeError';this.retryable=retryable;Object.assign(this,details);}}
 const safeAmount=v=>{try{return decimal(units(v||'0'));}catch{return '0';}};
 const event=(v,x={})=>({id:String(x.id??v.id??v.tradeId??v.billId??v.orderId),time:Number(x.time??v.time??v.cTime??v.createdAt??v.ts),kind:x.kind||'fill',market:x.market||'futures',symbol:x.symbol??v.symbol??v.contract??v.instId??'',currency:x.currency??v.currency??v.marginCoin??v.feeCoin??v.feeCurrency??v.commissionAsset??'USDT',gross:safeAmount(x.gross),fee:safeAmount(x.fee),funding:safeAmount(x.funding),raw:v});
@@ -17,12 +19,30 @@ export function createExtraAdapter(exchange,credentials,options={},fetchImpl=fet
   let kucoinApiVersion=credentials.apiVersion?String(credentials.apiVersion):null;
   async function asterRpc(method,params){let response;try{response=await fetchImpl('https://tapi.asterdex.com/info',{method:'POST',headers:{'Content-Type':'application/json','Accept':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method,params}),redirect:'error',signal:AbortSignal.timeout(20000)});}catch{throw new ExchangeError('Aster Chain RPC недоступен или истекло время ожидания.',true);}const body=await parse(response);if(body.error)throw new ExchangeError(`Aster RPC: ${body.error.message||body.error.code||'ошибка запроса'}`);return body.result;}
   async function mexcContract(path,params={}){const sorted=Object.entries(params).filter(([,v])=>v!==undefined).sort(([a],[b])=>a.localeCompare(b)),query=new URLSearchParams(sorted.map(([k,v])=>[k,String(v)])).toString(),ts=String(Date.now()),headers={'ApiKey':credentials.apiKey,'Request-Time':ts,'Signature':hmac('sha256',credentials.secret,credentials.apiKey+ts+query),'Content-Type':'application/json'},body=await send(fetchImpl,`https://api.mexc.com${path}${query?'?'+query:''}`,headers);if(body.success===false||Number(body.code)!==0)throw new ExchangeError(body.message||`Ошибка MEXC Futures ${body.code}.`);return body.data;}
+  async function mexcSpot(path,query){
+    const clockError=()=>new ExchangeError('MEXC Spot отклонила время запроса (700003). Повторим синхронизацию автоматически.',true,{code:700003});
+    async function signedRequest(){
+      const timestamp=Date.now()+(mexcClockOffsets.get(fetchImpl)??0);
+      const signed=query+(query?'&':'')+`timestamp=${timestamp}&recvWindow=10000`;
+      const body=await send(fetchImpl,`${MEXC_API}${path}?${signed}&signature=${hmac('sha256',credentials.secret,signed)}`,{'X-MEXC-APIKEY':credentials.apiKey});
+      if(Number(body?.code)===700003)throw clockError();
+      if(Number(body?.code)<0)throw new ExchangeError(body.msg||`Ошибка биржи ${body.code}.`,false,{code:body.code});
+      return body;
+    }
+    try{return await signedRequest();}
+    catch(error){if(Number(error.code)!==700003)throw error;}
+    const clock=await send(fetchImpl,`${MEXC_API}/api/v3/time`,{'Cache-Control':'no-cache'});
+    const serverTime=Number(clock?.serverTime);
+    if(!Number.isSafeInteger(serverTime)||serverTime<1e12)throw clockError();
+    // Anchor the exchange's timestamp to receipt so latency cannot put the signature ahead of its clock.
+    mexcClockOffsets.set(fetchImpl,serverTime-Date.now());
+    try{return await signedRequest();}
+    catch(error){if(Number(error.code)===700003)throw clockError();throw error;}
+  }
   async function request(path,params={},host){
     const entries=Object.entries(params).filter(([,v])=>v!==undefined).map(([k,v])=>[k,String(v)]),query=new URLSearchParams(entries).toString(),now=Date.now();let url,headers={};
-    if(exchange==='MEXC'){
-      const signed=query+(query?'&':'')+`timestamp=${now}&recvWindow=10000`,base=host||'https://api.mexc.com';
-      url=`${base}${path}?${signed}&signature=${hmac('sha256',credentials.secret,signed)}`;headers={'X-MEXC-APIKEY':credentials.apiKey};
-    }else if(exchange==='Gate.io'){
+    if(exchange==='MEXC')return mexcSpot(path,query);
+    if(exchange==='Gate.io'){
       const prefix='/api/v4',ts=String(Math.floor(now/1000)),rawQuery=entries.map(([k,v])=>`${k}=${v}`).join('&'),bodyHash=createHash('sha512').update('').digest('hex'),sign=`GET\n${prefix+path}\n${rawQuery}\n${bodyHash}\n${ts}`;
       url=`https://api.gateio.ws${prefix}${path}${query?'?'+query:''}`;headers={KEY:credentials.apiKey,Timestamp:ts,SIGN:hmac('sha512',credentials.secret,sign),Accept:'application/json','Content-Type':'application/json'};
     }else if(exchange==='Bitget'){
