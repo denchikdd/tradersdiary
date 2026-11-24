@@ -108,6 +108,40 @@ test('MEXC splits a full 100-fill window and isolates an invalid spot pair',asyn
   }while(cursor);
   assert.deepEqual(events.map(v=>v.id),fills.map(v=>v.id));
 });
+test('MEXC preserves a missing interval when a spot pair is rejected repeatedly',async()=>{
+  const db=openDatabase(':memory:'),key=randomBytes(32),id=addConnection(db,key);
+  const day=86400000,now=Date.now(),missingFrom=now-3*day;
+  const options={spotAuto:false,futures:false,mexcSpotSymbols:['OLDUSDT','BTCUSDT'],
+    mexcSpotHistoryV2At:now,mexcUnavailablePairs:{OLDUSDT:missingFrom+day}};
+  db.prepare("UPDATE connections SET exchange='MEXC',start=?,synced=?,options=? WHERE id=?")
+    .run(now-5*day,now,JSON.stringify(options),id);
+  enqueue(db,id);
+  const calls=[];
+  let recovered=false;
+  const worker=createWorker(db,key,(exchange,credentials,opts)=>createAdapter(exchange,credentials,opts,async url=>{
+    const {pathname,searchParams}=new URL(url);
+    if(pathname!=='/api/v3/myTrades')return Response.json({balances:[]});
+    const symbol=searchParams.get('symbol');
+    calls.push([symbol,Number(searchParams.get('startTime'))]);
+    return symbol==='OLDUSDT'&&!recovered?Response.json({code:-1121},{status:400}):Response.json([]);
+  }));
+  const storedOptions=()=>JSON.parse(db.prepare('SELECT options FROM connections WHERE id=?').get(id).options);
+  try {
+    await worker.tick();await worker.tick();await worker.tick();
+    const paused=storedOptions();
+    assert.equal(paused.mexcUnavailablePairs.OLDUSDT.from,missingFrom);
+    assert(paused.mexcUnavailablePairs.OLDUSDT.retryAt>=now+day);
+    assert.deepEqual(calls.map(([symbol])=>symbol),['OLDUSDT','BTCUSDT']);
+    assert.equal(calls[0][1],missingFrom);
+    recovered=true;
+    paused.mexcUnavailablePairs.OLDUSDT.retryAt=0;
+    db.prepare('UPDATE connections SET options=? WHERE id=?').run(JSON.stringify(paused),id);
+    enqueue(db,id);
+    await worker.tick();
+    assert.deepEqual(calls[2],['OLDUSDT',missingFrom]);
+    assert(!storedOptions().mexcUnavailablePairs.OLDUSDT);
+  } finally {await worker.stop();db.close();}
+});
 test('Binance preserves the exchange retry deadline and the worker resumes the same page',async()=>{
   const db=openDatabase(':memory:'),key=randomBytes(32),id=addConnection(db,key);
   db.prepare("UPDATE connections SET exchange='Binance',options=? WHERE id=?").run(JSON.stringify({spotDiscoveryAt:Date.now(),futuresTradesBackfillAt:Date.now(),spotAuto:true,spotCandidates:['BTCUSDT']}),id);

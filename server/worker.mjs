@@ -121,8 +121,9 @@ export function createWorker(db,key,adapterFactory=createAdapter) {
       if(pass.activeStream&&pass.activeStream!==stream.id){delete pass.start;delete pass.cursor;}
       pass.activeStream=stream.id;
       const mexcSpot=c.exchange==='MEXC'&&stream.id.startsWith('spot:')?stream.id.slice(5):null;
-      const unavailableUntil=mexcSpot&&options.mexcUnavailablePairs?.[mexcSpot];
-      const replayFrom=unavailableUntil?Math.max(c.start,unavailableUntil-DAY):pass.effectiveStart;
+      const spotSkip=mexcSpot&&options.mexcUnavailablePairs?.[mexcSpot];
+      const skippedFrom=spotSkip?(spotSkip.from??spotSkip-DAY):null;
+      const replayFrom=skippedFrom===null?pass.effectiveStart:Math.max(c.start,skippedFrom);
       const start=pass.start??Math.max(Math.min(pass.effectiveStart,replayFrom),stream.start);
       const end=Math.min(start+stream.window-1,pass.end);
       if(start>pass.end) {finishStream(pass,stream.id);savePage(db,c.id,stream.id,[],job.id,state);}
@@ -142,7 +143,7 @@ export function createWorker(db,key,adapterFactory=createAdapter) {
         }
         if(page.unavailableSpotSymbol) {
           const unavailable=options.mexcUnavailablePairs??={};
-          unavailable[page.unavailableSpotSymbol]=now+DAY;
+          unavailable[page.unavailableSpotSymbol]={retryAt:now+DAY,from:Math.min(start,skippedFrom??start)};
           db.prepare('UPDATE connections SET options=? WHERE id=?').run(JSON.stringify(options),c.id);
         }
         if(!db.prepare('SELECT id FROM connections WHERE id=? AND disabled=0').get(c.id)) {
@@ -166,7 +167,7 @@ export function createWorker(db,key,adapterFactory=createAdapter) {
         if(page.next) {pass.start=start;pass.cursor=page.next;}
         else if(end>=pass.end||page.unavailableSpotSymbol) {
           finishStream(pass,stream.id);
-          if(unavailableUntil&&!page.unavailableSpotSymbol) {
+          if(spotSkip&&!page.unavailableSpotSymbol) {
             delete options.mexcUnavailablePairs[mexcSpot];
             db.prepare('UPDATE connections SET options=? WHERE id=?').run(JSON.stringify(options),c.id);
           }

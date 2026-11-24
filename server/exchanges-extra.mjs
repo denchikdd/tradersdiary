@@ -104,7 +104,10 @@ export function createExtraAdapter(exchange,credentials,options={},fetchImpl=fet
     if(exchange==='MEXC'){
       const spot=options.mexcSpotSymbols||options.spotSymbols||[];
       const futures=options.mexcFuturesSymbols||(options.spotSymbols||[]).map(symbol=>symbol.replace(/(USDT|USDC)$/,'_$1'));
-      const enabledSpot=spot.filter(symbol=>!(options.mexcUnavailablePairs?.[symbol]>Date.now()));
+      const enabledSpot=spot.filter(symbol=>{
+        const skip=options.mexcUnavailablePairs?.[symbol];
+        return !((skip?.retryAt??skip)>Date.now());
+      });
       return [...enabledSpot.map(symbol=>({id:'spot:'+symbol,start:now-29*DAY,window:7*DAY})),
         ...(options.futures===false?[]:futures.map(symbol=>({id:'futures:'+symbol,start:now-89*DAY,window:89*DAY})))];
     }
