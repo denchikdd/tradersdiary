@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { encrypt,digest,passwordHash,passwordMatches,cents,units,decimal } from './security.mjs';
-import { enqueue } from './database.mjs';
+import { enqueue, exchangeRetryAt } from './database.mjs';
 import { catalog,createAdapter,normalizedCapital } from './exchanges.mjs';
 import { buildTrades,marketCandles,normalizeExecution,tickerOf } from './trade-details.mjs';
 import { chartIntervals } from './market-history.mjs';
@@ -131,20 +131,23 @@ export function createApi(db,key,{origin,secure,setupToken,adapterFactory=create
         if(!result.changes)throw new ApiError(404,'Изображение не найдено.');return send(res,200,{ok:true});
       }
       if(method==='GET'&&path==='/connections') {
-        const connections=db.prepare(`SELECT c.id,c.exchange,c.label,c.start,c.status,c.error,c.synced,c.disabled,
+        const connections=db.prepare(`SELECT c.id,c.exchange,c.label,c.start,c.status,c.error,c.synced,c.disabled,c.options,
           (SELECT count(*) FROM events e WHERE e.connection_id=c.id) AS records,
           (SELECT min(time) FROM events e WHERE e.connection_id=c.id) AS earliest,
           (SELECT checkpoint FROM jobs j WHERE j.connection_id=c.id ORDER BY id DESC LIMIT 1) AS checkpoint
           FROM connections c ORDER BY c.created`).all();
-        return send(res,200,{catalog,connections:connections.map(({checkpoint,...c})=>{
+        return send(res,200,{catalog,connections:connections.map(({checkpoint,options,...c})=>{
           const state=JSON.parse(checkpoint||'{}');
-          return {...c,checkingRecent:!!state.live&&c.status==='syncing'};
+          const retryAt=exchangeRetryAt(db,c.exchange);
+          const unavailable=Object.keys(JSON.parse(options||'{}').mexcUnavailablePairs||{});
+          const warning=unavailable.length?`MEXC не отдаёт историю по ${unavailable.slice(0,4).join(', ')}${unavailable.length>4?` и ещё ${unavailable.length-4}`:''}. Остальные пары проверяются.`:null;
+          return {...c,checkingRecent:!!state.live&&c.status==='syncing',nextRetryAt:retryAt>Date.now()?retryAt:null,warning};
         })});
       }
       if(method==='POST'&&path==='/sync') {
         for(const {id} of db.prepare("SELECT id FROM connections WHERE disabled=0 AND status<>'unsupported'").all()) {
           enqueue(db,id);
-          db.prepare("UPDATE jobs SET next_run=0,checkpoint=json_set(checkpoint,'$.liveAttemptAt',1) WHERE connection_id=? AND status='queued'").run(id);
+          db.prepare("UPDATE jobs SET checkpoint=json_set(checkpoint,'$.liveAttemptAt',1) WHERE connection_id=? AND status='queued'").run(id);
         }
         return send(res,202,{ok:true});
       }
@@ -175,7 +178,7 @@ export function createApi(db,key,{origin,secure,setupToken,adapterFactory=create
           const failed=db.prepare("SELECT id FROM jobs WHERE connection_id=? AND status='failed' ORDER BY id DESC LIMIT 1").get(id);
           const active=db.prepare("SELECT id FROM jobs WHERE connection_id=? AND status IN ('queued','running')").get(id);
           if(failed&&!active)db.prepare("UPDATE jobs SET status='queued',attempts=0,next_run=0,error=NULL WHERE id=?").run(failed.id);else enqueue(db,id);
-          if(verb==='sync')db.prepare("UPDATE jobs SET next_run=0,checkpoint=json_set(checkpoint,'$.liveAttemptAt',1) WHERE connection_id=? AND status='queued'").run(id);
+          if(verb==='sync')db.prepare("UPDATE jobs SET checkpoint=json_set(checkpoint,'$.liveAttemptAt',1) WHERE connection_id=? AND status='queued'").run(id);
         }
         return send(res,200,{ok:true});
       }
@@ -199,7 +202,10 @@ export function createApi(db,key,{origin,secure,setupToken,adapterFactory=create
       if(method==='GET'&&path==='/trade-details') {
         const date=url.searchParams.get('date'),ticker=String(url.searchParams.get('ticker')||'').toUpperCase(),exchange=url.searchParams.get('exchange')||'all',market=url.searchParams.get('market')||'all';
         const day=Date.parse(date);if(!/^\d{4}-\d{2}-\d{2}$/.test(date||'')||!Number.isFinite(day)||ticker.length>30)throw new ApiError(400,'Некорректный день или тикер.');
-        const matches=v=>(!ticker||tickerOf(v.symbol)===ticker)&&(exchange==='all'||v.exchange===exchange)&&(market==='all'||v.market===market);
+        const connectionId=url.searchParams.get('connectionId');
+        if(connectionId&&!/^[a-z0-9-]{36}$/i.test(connectionId))throw new ApiError(400,'Некорректный счёт.');
+        const matches=v=>(!ticker||tickerOf(v.symbol)===ticker)&&(exchange==='all'||v.exchange===exchange)&&
+          (market==='all'||v.market===market)&&(!connectionId||v.connection_id===connectionId);
         const rows=db.prepare(`SELECT e.*,c.exchange,c.label FROM events e JOIN connections c ON c.id=e.connection_id WHERE e.time>=? AND e.time<? AND e.kind IN ('fill','pnl') ORDER BY e.time`).all(day-7*86400000,day+86400000);
         const relevant=rows.filter(matches);
         const executions=relevant.filter(v=>(v.market==='futures'||v.exchange==='Hyperliquid')&&

@@ -1,12 +1,13 @@
 "use client";
 import { useCallback, useEffect, useState } from 'react';
 import { Check, ChevronDown, Eye, EyeOff, ImagePlus, Pencil, Save, Trash2, WalletCards } from 'lucide-react';
-import { percentOfCapital, type Trade } from '@/lib/journal';
+import { type Trade } from '@/lib/journal';
 
-type Connection={id:string;exchange:string;label:string;start:number;status:string;error:string|null;synced:number|null;records:number;earliest:number|null;disabled:number;checkingRecent:boolean};
+type Connection={id:string;exchange:string;label:string;start:number;status:string;error:string|null;synced:number|null;records:number;earliest:number|null;disabled:number;checkingRecent:boolean;nextRetryAt:number|null;warning:string|null};
 const syncLabels:Record<string,string>={queued:'В очереди',syncing:'Загрузка истории',retrying:'Ожидаем биржу',ready:'Обновлено',partial:'История неполная',error:'Ошибка загрузки',unsupported:'Только баланс'};
 function syncLabel(connection:Connection){
   if(connection.disabled)return 'На паузе';
+  if(connection.nextRetryAt)return 'Пауза по лимиту биржи';
   if(connection.checkingRecent)return 'Проверяем новые сделки';
   return syncLabels[connection.status]||connection.status;
 }
@@ -58,13 +59,15 @@ export function SyncStatus(){
   },[]);
   if(!accounts.length)return null;
   const enabled=accounts.filter(c=>!c.disabled&&c.status!=='unsupported');
-  const incomplete=enabled.filter(c=>c.error||!c.synced||Date.now()-c.synced>8*60*1000).length;
+  const incomplete=enabled.filter(c=>c.error||c.warning||c.nextRetryAt||!c.synced||Date.now()-c.synced>8*60*1000).length;
   return <section className="sync-panel" aria-label="Синхронизация сделок">
     <div className="sync-panel-heading">
       <details><summary>Синхронизация сделок {incomplete>0&&<span className="sync-attention">{incomplete} из {enabled.length} сч. с неполными данными</span>}</summary>
         <div className="sync-accounts">{accounts.map(c=><div key={c.id}><b>{c.exchange} · {c.label}</b><span>{syncLabel(c)}</span>
           {c.synced&&<small>Проверено {new Date(c.synced).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}</small>}
+          {c.nextRetryAt&&<small>Повтор после {new Date(c.nextRetryAt).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}</small>}
           {c.error&&<small className="sync-attention">{c.error}</small>}
+          {c.warning&&<small className="sync-attention">{c.warning}</small>}
         </div>)}</div>
       </details>
       <button className="secondary-button" disabled={busy||!enabled.length} onClick={async()=>{
@@ -100,19 +103,6 @@ export function CapitalCard({data,error,hidden,onHiddenChange}:{data:PortfolioCa
   const balances=(data?.accounts||[]).reduce<Array<{exchange:string;equity:number;accounts:number}>>((result,account)=>{const current=result.find(v=>v.exchange===account.exchange);if(current){current.equity+=Number(account.equityUsd||0);current.accounts+=1;}else result.push({exchange:account.exchange,equity:Number(account.equityUsd||0),accounts:1});return result;},[]);
   const format=(value:number)=>value.toLocaleString('ru-RU',{style:'currency',currency:'USD',minimumFractionDigits:2});
   return <div className="capital-popover"><section className="capital-card" aria-label="Общий капитал"><button className="capital-card-main" onClick={()=>setExpanded(v=>!v)} aria-expanded={expanded} aria-controls="capital-breakdown"><WalletCards size={18}/><span className="capital-copy"><span>Общий капитал</span><strong aria-label={hidden?'Капитал скрыт':total}>{hidden?'•••••• $':count?total:'—'}</strong><small>{error?'Не удалось обновить':count?`${count} подключений · обновлено ${new Date(data?.updatedAt||0).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'})}`:'Подключите биржу'}</small></span></button><div className="capital-actions"><button className="icon-button" onClick={toggle} aria-label={hidden?'Показать капитал':'Скрыть капитал'}>{hidden?<Eye size={17}/>:<EyeOff size={17}/>}</button><button className="icon-button" onClick={()=>setExpanded(v=>!v)} aria-label={expanded?'Скрыть балансы бирж':'Показать балансы бирж'} aria-expanded={expanded}><ChevronDown className={expanded?'expanded':''} size={17}/></button></div></section>{expanded&&<div id="capital-breakdown" className="capital-breakdown"><div className="capital-breakdown-head"><span>Баланс по биржам</span><small>{balances.length} {balances.length===1?'биржа':'бирж'}</small></div>{balances.map(item=><div className="capital-balance-row" key={item.exchange}><span><b>{item.exchange}</b>{item.accounts>1&&<small>{item.accounts} счёта</small>}</span><strong aria-label={hidden?'Баланс скрыт':format(item.equity)}>{hidden?'•••••• $':format(item.equity)}</strong></div>)}{!balances.length&&<p>После синхронизации здесь появятся балансы.</p>}<div className="capital-breakdown-total"><span>Общий капитал</span><strong>{hidden?'•••••• $':count?total:'—'}</strong></div></div>}</div>;
-}
-export function AccountAnalytics({enabled,unit,capitalUsd}:{enabled:boolean;unit:'usd'|'percent';capitalUsd:number}) {
-  const [period,setPeriod]=useState<'day'|'week'|'month'|'year'>('month'),[rows,setRows]=useState<Trade[]>([]),[accounts,setAccounts]=useState<Array<CapitalAccount&{availableUsd:string|null}>>([]);
-  useEffect(()=>{if(!enabled)return;let active=true;const now=new Date(),from=`${now.getUTCFullYear()}-01-01`,to=`${now.getUTCFullYear()}-12-31`;async function load(){try{const [journal,capital]=await Promise.all([journalApi<{rows:Trade[]}>(`/journal?from=${from}&to=${to}`),journalApi<{accounts?:Array<CapitalAccount&{availableUsd:string|null}>}>('/balances')]);if(active){setRows(journal.rows);setAccounts(capital.accounts||[]);}}catch{}}void load();const timer=setInterval(load,30000);return()=>{active=false;clearInterval(timer);};},[enabled]);
-  if(!enabled)return null;const now=new Date(),today=now.toISOString().slice(0,10),week=new Date(now);week.setUTCDate(now.getUTCDate()-((now.getUTCDay()+6)%7));const start=period==='day'?today:period==='week'?week.toISOString().slice(0,10):period==='month'?today.slice(0,7)+'-01':today.slice(0,4)+'-01-01',filtered=rows.filter(v=>v.date>=start&&v.date<=today),net=filtered.reduce((s,v)=>s+v.gross-v.fee+v.funding,0),fees=filtered.reduce((s,v)=>s+v.fee,0),funding=filtered.reduce((s,v)=>s+v.funding,0),wins=filtered.filter(v=>v.gross-v.fee+v.funding>0).length,winrate=filtered.length?wins/filtered.length*100:0,usd=(c:number)=>new Intl.NumberFormat('ru-RU',{style:'currency',currency:'USD'}).format(c/100),display=(c:number)=>unit==='usd'?usd(c):`${c>0?'+':c<0?'−':''}${Math.abs(percentOfCapital(c,capitalUsd)).toFixed(2)}%`;
-  const accountDisplay=(c:number,a:CapitalAccount)=>unit==='usd'?usd(c):!Number(a.equityUsd)?'—':`${c>0?'+':c<0?'−':''}${Math.abs(percentOfCapital(c,Number(a.equityUsd||0))).toFixed(2)}%`;
-  const accountsById=new Map(accounts.map(account=>[account.connectionId,account]));
-  for(const row of filtered){
-    if(!row.connectionId||accountsById.has(row.connectionId))continue;
-    accountsById.set(row.connectionId,{connectionId:row.connectionId,exchange:row.exchange,label:row.account,time:0,equityUsd:'',warning:null,availableUsd:null});
-  }
-  const exchangeRows=[...accountsById.values()].map(a=>{const rr=filtered.filter(v=>v.connectionId?v.connectionId===a.connectionId:v.exchange===a.exchange&&v.account===a.label),profit=rr.reduce((s,v)=>s+v.gross-v.fee+v.funding,0),commission=rr.reduce((s,v)=>s+v.fee,0),fund=rr.reduce((s,v)=>s+v.funding,0);return {...a,profit,commission,fund};});
-  return <section className="account-analytics"><div className="analytics-head"><h2>Финрез по счетам</h2><div className="period-switch">{([['day','Сегодня'],['week','Неделя'],['month','Месяц'],['year','Год']] as const).map(([id,label])=><button key={id} className={period===id?'active':''} onClick={()=>setPeriod(id)}>{label}</button>)}</div></div><div className="metric-strip"><div><span>Чистый PnL</span><strong className={net>=0?'positive':'negative'}>{display(net)}</strong></div><div><span>Комиссии</span><strong className="negative">{display(-fees)}</strong></div><div><span>Финансирование</span><strong>{display(funding)}</strong></div><div><span>Плюсовые записи</span><strong>{winrate.toFixed(1)}%</strong></div><div><span>Записи PnL</span><strong>{filtered.length}</strong></div></div><div className="accounts-table-wrap"><table className="accounts-table"><thead><tr><th>Биржа / счёт</th><th>Капитал</th><th>Результат</th><th>Комиссия</th><th>Фандинг</th></tr></thead><tbody>{exchangeRows.map(a=><tr key={a.connectionId||a.exchange+a.label}><td><b>{a.exchange}</b><small>{a.label}</small></td><td>{a.equityUsd?Number(a.equityUsd).toLocaleString('ru-RU',{style:'currency',currency:'USD'}):'—'}</td><td className={a.profit>=0?'positive':'negative'}>{accountDisplay(a.profit,a)}</td><td className="negative">{a.commission?accountDisplay(-a.commission,a):'—'}</td><td>{accountDisplay(a.fund,a)}</td></tr>)}</tbody></table>{!exchangeRows.length&&<p className="empty-state">После первой синхронизации здесь появятся капитал и статистика каждого счёта.</p>}</div></section>;
 }
 export function OwnerAccess({onOpen}:{onOpen:()=>void}) {
   const [state,setState]=useState<'loading'|'setup'|'login'|'error'>('loading'),[error,setError]=useState(''),[busy,setBusy]=useState(false);

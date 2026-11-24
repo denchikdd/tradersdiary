@@ -17,18 +17,33 @@ export const catalog = [
   { id:'Lighter',enabled:true,address:true,notice:'Публичный адрес L1: капитал аккаунта. Для полной приватной истории позже понадобится signer API.' },
 ];
 const hmac = (secret, text, encoding='hex') => createHmac('sha256',secret).update(text).digest(encoding);
-export class ExchangeError extends Error { constructor(message, retryable=false) { super(message); this.name='ExchangeError';this.retryable=retryable; } }
+export class ExchangeError extends Error {
+  constructor(message,retryable=false,details={}) {
+    super(message);
+    this.name='ExchangeError';
+    this.retryable=retryable;
+    Object.assign(this,details);
+  }
+}
+function binanceLimit(response) {
+  const now=Date.now();
+  const value=response.headers.get('Retry-After')?.trim();
+  const timestamp=value&&/^\d+$/.test(value)?now+Number(value)*1000:Date.parse(value||'');
+  const retryAt=Number.isFinite(timestamp)&&timestamp>now?timestamp:now+(response.status===418?5:1)*60000;
+  return new ExchangeError(`Binance ограничила частоту запросов (HTTP ${response.status}).`,true,{retryAt});
+}
 const delay = ms => new Promise(resolve=>setTimeout(resolve, ms));
 // No arbitrary URLs, redirects or trading endpoints are accepted by these adapters.
 export function createAdapter(exchange, credentials, options={}, fetchImpl=fetch) {
   if(['Gate.io','Bitget','Aster','KuCoin','MEXC','Lighter'].includes(exchange))return createExtraAdapter(exchange,credentials,options,fetchImpl);
   async function publicJson(url) {
     let response;try{response=await fetchImpl(url,{method:'GET',redirect:'error',signal:AbortSignal.timeout(20000)});}catch{return null;}
+    if(exchange==='Binance'&&[418,429].includes(response.status))throw binanceLimit(response);
     if(!response.ok)return null;try{return JSON.parse(await response.text());}catch{return null;}
   }
   let krakenNonce=BigInt(Date.now())*1000n;
   async function request(path, params={}) {
-    await delay(fetchImpl === fetch ? (exchange==='Kraken'?1100:exchange==='Binance'?220:180) : 0);
+    await delay(fetchImpl === fetch ? (exchange==='Kraken'?1100:exchange==='Binance'?1000:180) : 0);
     let url, init = {method:'GET',redirect:'error',signal:AbortSignal.timeout(20000),headers:{}};
     const query = new URLSearchParams(Object.entries(params).filter(([,v])=>v!==undefined).map(([k,v])=>[k,String(v)])).toString();
     const now=String(Date.now());
@@ -55,6 +70,7 @@ export function createAdapter(exchange, credentials, options={}, fetchImpl=fetch
     } else throw new ExchangeError('Биржа пока не поддерживается.');
     let response;
     try { response=await fetchImpl(url,init); } catch { throw new ExchangeError('Биржа недоступна или истекло время ожидания.',true); }
+    if(exchange==='Binance'&&[418,429].includes(response.status))throw binanceLimit(response);
     if(response.status===429 || response.status===418 || response.status>=500) throw new ExchangeError(`Биржа временно ограничила запросы (HTTP ${response.status}).`,true);
     if(!response.ok) throw new ExchangeError(`Биржа отклонила запрос (HTTP ${response.status}). Проверьте регион, IP и права ключа.`);
     let body;
@@ -70,7 +86,8 @@ export function createAdapter(exchange, credentials, options={}, fetchImpl=fetch
     const code=exchange==='Bybit'?body.retCode:exchange==='OKX'?body.code:exchange==='Binance'?body.code:0;
     if(code!==undefined && Number(code)!==0) {
       const detail=String(body.retMsg||body.msg||'').replace(/[\r\n]+/g,' ').slice(0,180);
-      throw new ExchangeError(`Ошибка биржи ${Number(code)}${detail?`: ${detail}`:''}. Проверьте ключ, права, IP и тип аккаунта.`,[10006,10000,50011,-1003,-1021].includes(Number(code)));
+      if(exchange==='Binance'&&Number(code)===-1003)throw binanceLimit(response);
+      throw new ExchangeError(`Ошибка биржи ${Number(code)}${detail?`: ${detail}`:''}. Проверьте ключ, права, IP и тип аккаунта.`,[10006,10000,50011,-1021].includes(Number(code)));
     }
     return exchange==='Bybit'?body.result:exchange==='OKX'?body.data:body;
   }

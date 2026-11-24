@@ -2,6 +2,7 @@ import { createHash,createHmac } from 'node:crypto';
 import { Wallet } from 'ethers';
 import { decimal,units } from './security.mjs';
 const DAY=86400000,hmac=(algo,key,text,enc='hex')=>createHmac(algo,key).update(text).digest(enc);
+const MEXC_SPOT_PAGE_SIZE=100;
 class ExchangeError extends Error{constructor(message,retryable=false,details={}){super(message);this.name='ExchangeError';this.retryable=retryable;Object.assign(this,details);}}
 const safeAmount=v=>{try{return decimal(units(v||'0'));}catch{return '0';}};
 const event=(v,x={})=>({id:String(x.id??v.id??v.tradeId??v.billId??v.orderId),time:Number(x.time??v.time??v.cTime??v.createdAt??v.ts),kind:x.kind||'fill',market:x.market||'futures',symbol:x.symbol??v.symbol??v.contract??v.instId??'',currency:x.currency??v.currency??v.marginCoin??v.feeCoin??v.feeCurrency??v.commissionAsset??'USDT',gross:safeAmount(x.gross),fee:safeAmount(x.fee),funding:safeAmount(x.funding),raw:v});
@@ -36,7 +37,7 @@ export function createExtraAdapter(exchange,credentials,options={},fetchImpl=fet
     }else throw new ExchangeError('Биржа пока не поддерживается.');
     const body=await send(fetchImpl,url,headers);
     if(exchange==='Bitget'&&body.code!=='00000')throw new ExchangeError(body.msg||`Ошибка Bitget API (${body.code}).`,false,{code:body.code});
-    if(body?.code!==undefined&&Number(body.code)<0)throw new ExchangeError(body.msg||`Ошибка биржи ${body.code}.`);
+    if(body?.code!==undefined&&Number(body.code)<0)throw new ExchangeError(body.msg||`Ошибка биржи ${body.code}.`,false,{code:body.code});
     return exchange==='Bitget'?body.data:body;
   }
   async function asterPrivate(path,params={},host='https://fapi.asterdex.com'){
@@ -76,7 +77,7 @@ export function createExtraAdapter(exchange,credentials,options={},fetchImpl=fet
       options.asterSymbols=[...symbols].filter(v=>/^[A-Z0-9]{4,30}$/.test(v)).sort();
       options.asterDiscoveryAt=end;return true;
     }
-    if(exchange!=='MEXC'||options.spotAuto===false||options.mexcDiscoveryAt&&Date.now()-options.mexcDiscoveryAt<7*DAY)return false;
+    if(exchange!=='MEXC'||options.spotAuto===false||options.mexcCatalogVersion===1&&options.mexcDiscoveryAt&&Date.now()-options.mexcDiscoveryAt<DAY)return false;
     const configured=(options.spotSymbols||[]).map(v=>String(v).toUpperCase()),self=await request('/api/v3/selfSymbols'),listed=Array.isArray(self?.data)?self.data:Array.isArray(self)?self:[];
     options.mexcSpotSymbols=[...new Set([...configured,...listed].map(v=>String(v).toUpperCase()).filter(v=>/^[A-Z0-9]{4,30}$/.test(v)))].sort();
     if(options.futures!==false){
@@ -88,7 +89,7 @@ export function createExtraAdapter(exchange,credentials,options={},fetchImpl=fet
       }
       options.mexcFuturesSymbols=[...futures].sort();
     }else options.mexcFuturesSymbols=[];
-    options.mexcDiscoveryAt=Date.now();return true;
+    options.mexcDiscoveryAt=Date.now();options.mexcCatalogVersion=1;return true;
   }
   async function snapshot(){
     if(exchange==='Aster'){if(!credentials.apiKey||!credentials.secret)throw new ExchangeError('Переподключите Aster с read-only API Wallet.');const [futures,spot]=await Promise.all([asterPrivate('/fapi/v3/account'),asterPrivate('/api/v3/account',{},'https://sapi.asterdex.com').catch(()=>null)]);const futuresEquity=Array.isArray(futures)?stableTotal(futures):futures.totalMarginBalance||futures.totalWalletBalance||stableTotal(futures.assets||futures.balances||[]);return {equityUsd:decimal(units(futuresEquity||'0')+units(stableTotal(spot?.balances||[]))),availableUsd:Array.isArray(futures)?null:futures.availableBalance||null,wallet:futures,spot,scope:'spot-stablecoins+perpetuals'};}
@@ -100,7 +101,13 @@ export function createExtraAdapter(exchange,credentials,options={},fetchImpl=fet
   }
   function streams(now){
     if(exchange==='Aster')return [{id:'income',start:0,window:7*DAY},...(options.asterSymbols||[]).map(symbol=>({id:`trades:${symbol}`,start:now-89*DAY,window:7*DAY}))];
-    if(exchange==='MEXC'){const spot=options.mexcSpotSymbols||options.spotSymbols||[],futures=options.mexcFuturesSymbols||(options.spotSymbols||[]).map(symbol=>symbol.replace(/(USDT|USDC)$/,'_$1'));return [...spot.map(symbol=>({id:'spot:'+symbol,start:now-30*DAY,window:7*DAY})),...(options.futures===false?[]:futures.map(symbol=>({id:'futures:'+symbol,start:now-89*DAY,window:89*DAY})))];}
+    if(exchange==='MEXC'){
+      const spot=options.mexcSpotSymbols||options.spotSymbols||[];
+      const futures=options.mexcFuturesSymbols||(options.spotSymbols||[]).map(symbol=>symbol.replace(/(USDT|USDC)$/,'_$1'));
+      const enabledSpot=spot.filter(symbol=>!(options.mexcUnavailablePairs?.[symbol]>Date.now()));
+      return [...enabledSpot.map(symbol=>({id:'spot:'+symbol,start:now-29*DAY,window:7*DAY})),
+        ...(options.futures===false?[]:futures.map(symbol=>({id:'futures:'+symbol,start:now-89*DAY,window:89*DAY})))];
+    }
     if(exchange==='Gate.io')return [{id:'spot',start:now-365*DAY,window:7*DAY},...['pnl','fee','fund'].map(type=>({id:`futures:${type}`,start:now-179*DAY,window:7*DAY}))];
     if(exchange==='Bitget'){if(options.accountMode==='uta'){const categories=['SPOT','MARGIN','USDT-FUTURES','USDC-FUTURES','COIN-FUTURES'];return [...categories.map(category=>({id:`uta-fills:${category}`,start:now-89*DAY,window:30*DAY})),...categories.slice(2).map(category=>({id:`uta-funding:${category}`,start:now-89*DAY,window:30*DAY}))];}return ['USDT-FUTURES','USDC-FUTURES'].map(id=>({id:'bills:'+id,start:now-89*DAY,window:7*DAY}));}
     if(exchange==='KuCoin')return [{id:'futures-ledger',start:now-365*DAY,window:DAY},{id:'spot',start:now-6*DAY,window:7*DAY}];
@@ -114,7 +121,33 @@ export function createExtraAdapter(exchange,credentials,options={},fetchImpl=fet
         next:fills.length===100&&data?.lastId?String(data.lastId):null};
     }
     if(exchange==='Aster'){if(!credentials.apiKey||!credentials.secret)throw new ExchangeError('Удалите это подключение и добавьте Aster заново с read-only API Wallet.');if(stream.startsWith('trades:')){const symbol=stream.slice(7);rows=await asterPrivate('/fapi/v3/userTrades',{symbol,startTime:start,endTime:end,limit:1000});return {events:rows.map(v=>event(v,{id:v.id,time:v.time,kind:'fill',market:'futures',symbol:v.symbol,fee:v.commission,currency:v.commissionAsset||'USDT'})),next:null};}const page=Number(cursor||1),result=await asterPrivate('/fapi/v3/incomePage',{startTime:start,endTime:end,page,limit:1000});rows=Array.isArray(result)?result:result?.rows||[];next=!Array.isArray(result)&&result?.hasMore?String(page+1):null;return {events:rows.map((v,i)=>event(v,{id:v.tranId||`${v.time}:${v.incomeType}:${v.symbol}:${i}`,time:v.time,kind:['REALIZED_PNL','COMMISSION','FUNDING_FEE'].includes(v.incomeType)?'pnl':'transfer',market:'futures',symbol:v.symbol,gross:v.incomeType==='REALIZED_PNL'?v.income:'0',fee:v.incomeType==='COMMISSION'?decimal(-units(v.income)):'0',funding:v.incomeType==='FUNDING_FEE'?v.income:'0',currency:v.asset||'USDT'})),next};}
-    if(exchange==='MEXC'){const futures=stream.startsWith('futures:'),symbol=stream.slice(futures?8:5);if(futures){const r=await mexcContract('/api/v1/private/order/list/order_deals',{symbol,start_time:start,end_time:end,page_num:cursor||1,page_size:100});rows=r?.resultList||r||[];next=rows.length===100?String(Number(cursor||1)+1):null;return {events:rows.map(v=>event(v,{market:'futures',kind:'pnl',time:v.timestamp,symbol:v.symbol,gross:v.profit,fee:v.fee,currency:v.feeCurrency||'USDT'})),next};}rows=await request('/api/v3/myTrades',{symbol,startTime:start,endTime:end,limit:1000,fromId:cursor||undefined});next=rows.length===1000?String(rows.at(-1).id):null;return {events:rows.map(v=>event(v,{market:'spot',symbol,fee:v.commission,currency:v.commissionAsset,time:v.time})),next};}
+    if(exchange==='MEXC'){
+      if(stream.startsWith('futures:')){
+        const symbol=stream.slice(8);
+        const result=await mexcContract('/api/v1/private/order/list/order_deals',{symbol,start_time:start,end_time:end,page_num:cursor||1,page_size:100});
+        rows=result?.resultList||result||[];
+        next=rows.length===100?String(Number(cursor||1)+1):null;
+        return {events:rows.map(v=>event(v,{market:'futures',kind:'pnl',time:v.timestamp,symbol:v.symbol,gross:v.profit,fee:v.fee,currency:v.feeCurrency||'USDT'})),next};
+      }
+      const symbol=stream.slice(5);
+      const windows=cursor?JSON.parse(cursor):[[start,end]];
+      const [from,to]=windows.shift();
+      try {
+        rows=await request('/api/v3/myTrades',{symbol,startTime:from,endTime:to,limit:MEXC_SPOT_PAGE_SIZE});
+      } catch(error) {
+        if(Number(error.code)===-1121)return {events:[],next:null,unavailableSpotSymbol:symbol};
+        throw error;
+      }
+      if(!Array.isArray(rows))throw new ExchangeError('MEXC вернула некорректный список сделок.',true);
+      if(rows.length>=MEXC_SPOT_PAGE_SIZE) {
+        if(from>=to)throw new ExchangeError(`MEXC: слишком много исполнений ${symbol} с одной меткой времени.`);
+        const middle=Math.floor((from+to)/2);
+        windows.unshift([from,middle],[middle+1,to]);
+        return {events:[],next:JSON.stringify(windows)};
+      }
+      return {events:rows.filter(v=>v.time>=from&&v.time<=to).map(v=>event(v,{market:'spot',symbol,fee:v.commission,currency:v.commissionAsset,time:v.time})),
+        next:windows.length?JSON.stringify(windows):null};
+    }
     if(exchange==='Gate.io'){const spot=stream==='spot',to=spot?Math.floor(end/1000):Number(cursor||Math.floor(end/1000));rows=spot?await request('/spot/my_trades',{from:Math.floor(start/1000),to,limit:1000,page:cursor||1}):await request('/futures/usdt/account_book',{from:Math.floor(start/1000),to,limit:1000,type:stream.slice(8)});if(spot)next=rows.length===1000?String(Number(cursor||1)+1):null;else if(rows.length===1000){const oldest=Math.min(...rows.map(v=>Number(v.time)));next=Number.isFinite(oldest)?String(Math.floor(oldest)):null;}return {events:rows.map(v=>spot?event(v,{market:'spot',time:Number(v.create_time_ms||v.create_time*1000),symbol:v.currency_pair,fee:v.fee,currency:v.fee_currency}):event(v,{kind:'pnl',time:Number(v.time)*1000,symbol:v.contract,gross:v.type==='pnl'?v.change:'0',fee:v.type==='fee'?decimal(-units(v.change)):'0',funding:v.type==='fund'?v.change:'0',currency:'USDT'})),next};}
     if(exchange==='Bitget'){if(stream.startsWith('uta-')){const fills=stream.startsWith('uta-fills:'),category=stream.slice(fills?10:12),r=await request(fills?'/api/v3/trade/fills':'/api/v3/account/financial-records',{category,startTime:start,endTime:end,limit:100,cursor:cursor||undefined});rows=r?.list||[];next=r?.cursor||null;if(fills){const events=[];for(const v of rows){const details=Array.isArray(v.feeDetail)?v.feeDetail:[],settlement=category==='USDC-FUTURES'?'USDC':'USDT',market=['SPOT','MARGIN'].includes(category)?'spot':'futures',raw={...v};events.push(event(raw,{id:`fill:${v.execId}`,time:v.createdTime,kind:'fill',market,symbol:v.symbol,currency:details[0]?.feeCoin||settlement}));if(safeAmount(v.execPnl)!=='0.000000000000')events.push(event(raw,{id:`pnl:${v.execId}`,time:v.createdTime,kind:'pnl',market,symbol:v.symbol,gross:v.execPnl||'0',currency:settlement}));for(let i=0;i<details.length;i++){const fee=safeAmount(details[i]?.fee);if(fee!=='0.000000000000')events.push(event(raw,{id:`pnl:${v.execId}:fee:${i}`,time:v.createdTime,kind:'pnl',market,symbol:v.symbol,fee,currency:details[i]?.feeCoin||settlement}));}}return {events,next};}const fundingTypes=new Set(['CONTRACT_MAIN_SETTLE_FEE_USER_IN','CONTRACT_MAIN_SETTLE_FEE_USER_OUT','MARGIN_SETTLE_FEE_USER_IN','MARGIN_SETTLE_FEE_USER_OUT']),events=rows.filter(v=>fundingTypes.has(String(v.type).toUpperCase())).map(v=>{const type=String(v.type).toUpperCase(),amount=units(v.amount||'0'),signed=type.endsWith('_OUT')&&amount>0n?-amount:amount;return event(v,{id:`funding:${v.id}`,time:v.ts,kind:'pnl',market:'futures',symbol:v.symbol,funding:decimal(signed),currency:v.coin||(category==='USDC-FUTURES'?'USDC':'USDT')});});return {events,next};}const productType=stream.slice(6),r=await request('/api/v2/mix/account/bill',{productType,startTime:start,endTime:end,limit:100,idLessThan:cursor||undefined});rows=r?.bills||r||[];next=rows.length===100?String(r?.endId||rows.at(-1).id||rows.at(-1).billId):null;const closes=/^(close_|force_close_|adl_close_|adl_buy_|adl_sell_|force_buy_|force_sell_|burst_|offset_reduce_close_)/;return {events:rows.map(v=>{const type=String(v.businessType||'').toLowerCase();return event(v,{id:v.billId||v.id,time:v.cTime||v.ctime,kind:'pnl',symbol:v.symbol,gross:closes.test(type)?v.amount:'0',fee:decimal(-units(v.fee||'0')),funding:type==='contract_settle_fee'?v.amount:'0',currency:v.coin||v.marginCoin||'USDT'});}),next};}
     if(exchange==='KuCoin'){const r=await request('/api/v1/transaction-history',{startAt:start,endAt:end,maxCount:50,offset:cursor||undefined,forward:true},'https://api-futures.kucoin.com');rows=r.dataList||[];next=r.hasMore&&rows.length?String(rows.at(-1).offset):null;return {events:rows.map(v=>event(v,{id:v.offset,time:v.time,kind:['RealisedPNL','FundingFee','TradingFee'].includes(v.type)?'pnl':'transfer',symbol:v.remark,gross:v.type==='RealisedPNL'?v.amount:'0',fee:v.type==='TradingFee'?decimal(-units(v.amount)):'0',funding:v.type==='FundingFee'?v.amount:'0',currency:v.currency})),next};}

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash,createHmac,randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
-import { openDatabase,enqueue,savePage } from './database.mjs';
+import { openDatabase,enqueue,exchangeRetryAt,savePage } from './database.mjs';
 import { encrypt,decrypt,units,decimal,passwordHash,passwordMatches } from './security.mjs';
 import { createApi } from './api.mjs';
 import { createWorker, SYNC_INTERVAL } from './worker.mjs';
@@ -89,6 +89,53 @@ test('MEXC discovers spot and futures symbols automatically',async()=>{
   assert.deepEqual(adapter.streams(Date.now()).map(v=>v.id),['spot:BTCUSDT','spot:ETHUSDT','futures:ETH_USDC','futures:SOL_USDT']);
   assert(calls.find(v=>v.url.includes('/position/list/history_positions')).url.startsWith('https://api.mexc.com/'));
   assert.equal(await adapter.prepare(),false);
+});
+test('MEXC splits a full 100-fill window and isolates an invalid spot pair',async()=>{
+  const from=Date.now()-10000,to=from+999;
+  const fills=Array.from({length:101},(_,i)=>({id:`t${i}`,time:from+i*8,commissionAsset:'USDT'}));
+  const adapter=createAdapter('MEXC',{apiKey:'key123',secret:'secret123'},{futures:false},async url=>{
+    const params=new URL(url).searchParams;
+    assert.equal(params.get('limit'),'100');assert(!params.has('fromId'));
+    if(params.get('symbol')==='OLDUSDT')return Response.json({code:-1121,msg:'Invalid symbol.'},{status:400});
+    return Response.json(fills.filter(v=>v.time>=Number(params.get('startTime'))&&v.time<=Number(params.get('endTime'))).slice(0,100));
+  });
+  const invalid=await adapter.page('spot:OLDUSDT',from,to);
+  assert.equal(invalid.unavailableSpotSymbol,'OLDUSDT');
+  let cursor=null,events=[];
+  do{
+    const page=await adapter.page('spot:BTCUSDT',from,to,cursor);
+    cursor=page.next;events.push(...page.events);
+  }while(cursor);
+  assert.deepEqual(events.map(v=>v.id),fills.map(v=>v.id));
+});
+test('Binance preserves the exchange retry deadline and the worker resumes the same page',async()=>{
+  const db=openDatabase(':memory:'),key=randomBytes(32),id=addConnection(db,key);
+  db.prepare("UPDATE connections SET exchange='Binance',options=? WHERE id=?").run(JSON.stringify({spotDiscoveryAt:Date.now(),futuresTradesBackfillAt:Date.now(),spotAuto:true,spotCandidates:['BTCUSDT']}),id);
+  enqueue(db,id);
+  const calls=[];
+  const adapterFactory=(exchange,credentials,options)=>createAdapter(exchange,credentials,options,async url=>{
+    if(url.includes('/income')){
+      const params=new URL(url).searchParams;
+      calls.push([params.get('startTime'),params.get('endTime'),params.get('page')]);
+      return calls.length===1?Response.json([],{status:429,headers:{'Retry-After':'89'}}):Response.json([]);
+    }
+    throw new Error('Unexpected network request');
+  });
+  const worker=createWorker(db,key,adapterFactory);
+  const started=Date.now();
+  try {
+    await worker.tick();
+    const paused=db.prepare('SELECT status,next_run,checkpoint FROM jobs').get();
+    assert.equal(paused.status,'queued');assert(paused.next_run>=started+89000);
+    assert.equal(exchangeRetryAt(db,'Binance'),paused.next_run);
+    assert.equal(JSON.parse(paused.checkpoint).activeStream,'income');
+    db.prepare('UPDATE jobs SET next_run=0').run();
+    await worker.tick();assert.equal(calls.length,1);
+    assert.equal(db.prepare('SELECT synced FROM connections').get().synced,null);
+    db.prepare("UPDATE settings SET value='0' WHERE key='exchange-retry:Binance'").run();
+    await worker.tick();assert.equal(calls.length,2);
+    assert.deepEqual(calls[0],calls[1]);
+  } finally {await worker.stop();db.close();}
 });
 test('MEXC accepts a valid spot-only key when Futures API is unavailable',async()=>{
   const options={spotAuto:true,futures:true},calls=[];

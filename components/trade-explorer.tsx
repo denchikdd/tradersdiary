@@ -67,13 +67,14 @@ function TradeChart({trade}:{trade:Trade}){
   </section>;
 }
 
-export function TradeExplorer({date,ticker,exchange,market='all',onBack}:{date:string;ticker:string;exchange:string;market?:string;onBack:()=>void}){
+export function TradeExplorer({date,ticker,exchange,market='all',connectionId,onBack}:{date:string;ticker:string;exchange:string;market?:string;connectionId?:string;onBack:()=>void}){
   const [trades,setTrades]=useState<Trade[]>([]),[selected,setSelected]=useState(''),[loading,setLoading]=useState(true),[error,setError]=useState(''),[limited,setLimited]=useState(false);
   useEffect(()=>{
     let active=true;
     async function load(){
       try {
         const params=new URLSearchParams({date,ticker,exchange,market});
+        if(connectionId)params.set('connectionId',connectionId);
         const data=await journalApi<{trades:Trade[];limited:boolean}>(`/trade-details?${params}`);
         if(!active)return;
         setTrades(current=>{
@@ -89,7 +90,7 @@ export function TradeExplorer({date,ticker,exchange,market='all',onBack}:{date:s
     }
     void load();const timer=setInterval(load,15000);
     return()=>{active=false;clearInterval(timer);};
-  },[date,ticker,exchange,market]);
+  },[date,ticker,exchange,market,connectionId]);
   const trade=trades.find(v=>v.id===selected)||trades[0];
   return <div className="trade-explorer"><div className="trade-explorer-head"><button onClick={onBack}><ArrowLeft size={17}/>К разбивке</button><div><span>{date.split('-').reverse().join('.')} · UTC</span><h2>{ticker||'Сделки за день'} <small>{exchange==='all'?'Все биржи':exchange}</small></h2></div><DialogClose className="icon-button trade-explorer-close" aria-label="Закрыть"><X size={20}/></DialogClose></div>
     {loading?<div className="empty-state">Загружаю сделки…</div>:error?<div className="empty-state negative">{error}</div>:!trades.length?<div className="empty-state"><h3>Закрытые сделки пока не найдены</h3><p>Статус загрузки по каждому счёту показан в разделе синхронизации.</p></div>:<><div className="trade-upper"><div className="trade-picker">{trades.map(v=>{const priceMove=movement(v);return <button key={v.id} className={v.id===trade?.id?'active':''} onClick={()=>setSelected(v.id)}><span>{v.symbol}<small>{v.exchange} · {time(v.exitTime||v.entryTime)} UTC</small></span><strong className={v.pnl-v.fee>=0?'positive':'negative'}>{money(v.pnl-v.fee)}{priceMove!==null&&<small className={priceMove>=0?'positive':'negative'}>{percent(priceMove)}</small>}</strong><em>{v.direction==='long'?'LONG':v.direction==='short'?'SHORT':'PNL'}</em></button>})}</div>{trade&&<TradeNote key={trade.id} tradeKey={trade.id}/>}</div>{limited&&<p className="trade-data-note">По некоторым записям биржа передала только PnL и время закрытия.</p>}{trade&&<TradeChart key={trade.id} trade={trade}/>}</>}

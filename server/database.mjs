@@ -57,6 +57,15 @@ export function enqueue(db, id) {
   const now = Date.now();
   db.prepare("INSERT OR IGNORE INTO jobs(connection_id,created,updated) VALUES(?,?,?)").run(id, now, now);
 }
+export function exchangeRetryAt(db,exchange) {
+  return Number(db.prepare('SELECT value FROM settings WHERE key=?').get(`exchange-retry:${exchange}`)?.value)||0;
+}
+export function deferExchange(db,exchange,retryAt) {
+  const until=Math.max(retryAt,exchangeRetryAt(db,exchange));
+  db.prepare('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
+    .run(`exchange-retry:${exchange}`,String(until));
+  return until;
+}
 export function savePage(db, connectionId, stream, events, jobId, checkpoint) {
   const insert = db.prepare(`INSERT INTO events VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
     ON CONFLICT(connection_id,stream,external_id) DO UPDATE SET time=excluded.time,
