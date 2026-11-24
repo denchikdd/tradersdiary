@@ -258,17 +258,26 @@ test('worker persists pages, resumes after restart and marks snapshot completion
   const worker=createWorker(db,key,factory);await worker.tick();await worker.stop();
   const restarted=createWorker(db,key,factory);await restarted.tick();await restarted.tick();assert.equal(calls,1);assert.equal(db.prepare('SELECT status FROM connections').get().status,'ready');await restarted.stop();db.close();
 });
-test('worker refreshes after five minutes and rotates long imports between exchanges',async()=>{
+test('worker persists one exchange while another is slow, even when its balance call fails',async()=>{
   assert.equal(SYNC_INTERVAL,5*60*1000);
   const db=openDatabase(':memory:'),key=randomBytes(32),first=addConnection(db,key),second='22222222-2222-4222-8222-222222222222';
   db.prepare('INSERT INTO connections(id,exchange,label,secret,fingerprint,start,options,created) VALUES(?,?,?,?,?,?,?,?)').run(second,'OKX','Second',encrypt({apiKey:'key-2',secret:'secret-2',passphrase:'pass'},key,second),'fingerprint-2',Date.now()-10000,'{}',Date.now());
   enqueue(db,first);enqueue(db,second);
   db.prepare('UPDATE jobs SET updated=CASE connection_id WHEN ? THEN 1 ELSE 2 END').run(first);
-  const pages=[];
-  const factory=exchange=>({streams:()=>[{id:'ledger',start:0,window:1}],page:async()=>{pages.push(exchange);return {events:[],next:null};},snapshot:async()=>({wallet:[]})});
-  const worker=createWorker(db,key,factory);await worker.tick();await worker.tick();
-  assert.deepEqual(pages,['Bybit','OKX']);
-  assert.equal(db.prepare('SELECT count(*) AS n FROM snapshots').get().n,2);
+  let unblock;
+  const slow=new Promise(resolve=>{unblock=resolve;});
+  const factory=exchange=>({streams:()=>[{id:'ledger',start:0,window:86400000}],page:async()=>{
+    if(exchange==='Bybit')await slow;
+    return {events:[{id:'today',time:Date.now(),kind:'pnl',market:'futures',symbol:'BTCUSDT',currency:'USDT',gross:'1',raw:{}}],next:null};
+  },snapshot:async()=>{if(exchange==='OKX')throw new Error('Balance error');return {wallet:[]};}});
+  const worker=createWorker(db,key,factory);const pending=worker.tick();
+  try {
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(db.prepare('SELECT connection_id FROM events').get().connection_id,second);
+    await worker.tick();
+    assert.equal(db.prepare('SELECT status FROM connections WHERE id=?').get(second).status,'ready');
+  } finally {unblock();await pending;}
+  assert.equal(db.prepare('SELECT count(*) AS n FROM snapshots').get().n,1);
   await worker.stop();db.close();
 });
 test('worker refreshes recent PnL before a long historical import finishes',async()=>{

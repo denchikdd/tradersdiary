@@ -30,3 +30,28 @@ test('minute and higher charts use historical klines',async()=>{
   const candles=await marketCandles({exchange:'Binance',symbol:'AGTUSDT',market:'futures',from:1000,to:999999,intervalMs:3600000,fetchImpl:async()=>new Response(JSON.stringify([[1000,'10','12','9','11','25']]))});
   assert.deepEqual(candles,[{time:1000,open:10,high:12,low:9,close:11,volume:25}]);
 });
+
+test('minute candles use the original Hyperliquid spot ID and sort exchange responses',async()=>{
+  const from=Date.UTC(2026,10,24,12),to=from+60000;
+  const candles=await marketCandles({exchange:'Hyperliquid',symbol:'HYPEUSDC',coin:'@107',market:'spot',from,to,intervalMs:60000,
+    fetchImpl:async(url,request)=>{
+      assert.equal(String(url),'https://api.hyperliquid.xyz/info');
+      assert.deepEqual(JSON.parse(request.body),{type:'candleSnapshot',req:{coin:'@107',interval:'1m',startTime:from,endTime:to}});
+      return Response.json([{t:to,o:'12',h:'13',l:'11',c:'12',v:'4'},{t:from,o:'10',h:'12',l:'9',c:'11',v:'9'}]);
+    }});
+  assert.deepEqual(candles.map(v=>[v.time,v.close]),[[from,11],[to,12]]);
+});
+
+test('Gate spot and KuCoin spot decode their different candle column orders',async()=>{
+  const from=Date.UTC(2026,10,24,12),to=from+60000;
+  for(const [exchange,symbol,expectedSymbol,body] of [
+    ['Gate.io','EVAA_USDT','EVAA_USDT',[[from/1000,'100','11','12','9','10','5']]],
+    ['KuCoin','EVAA-USDT','EVAA-USDT',{data:[[from/1000,'10','11','12','9','5']]}],
+  ]){
+    const candles=await marketCandles({exchange,symbol,market:'spot',from,to,intervalMs:60000,fetchImpl:async url=>{
+      assert.equal(url.searchParams.get(exchange==='Gate.io'?'currency_pair':'symbol'),expectedSymbol);
+      return Response.json(body);
+    }});
+    assert.deepEqual(candles,[{time:from,open:10,high:12,low:9,close:11,volume:5}]);
+  }
+});

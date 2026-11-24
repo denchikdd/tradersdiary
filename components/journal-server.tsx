@@ -3,7 +3,13 @@ import { useCallback, useEffect, useState } from 'react';
 import { Check, ChevronDown, Eye, EyeOff, ImagePlus, Pencil, Save, Trash2, WalletCards } from 'lucide-react';
 import { percentOfCapital, type Trade } from '@/lib/journal';
 
-type Connection={id:string;exchange:string;label:string;start:number;status:string;error:string|null;synced:number|null;records:number;earliest:number|null;disabled:number};
+type Connection={id:string;exchange:string;label:string;start:number;status:string;error:string|null;synced:number|null;records:number;earliest:number|null;disabled:number;checkingRecent:boolean};
+const syncLabels:Record<string,string>={queued:'В очереди',syncing:'Загрузка истории',retrying:'Ожидаем биржу',ready:'Обновлено',partial:'История неполная',error:'Ошибка загрузки',unsupported:'Только баланс'};
+function syncLabel(connection:Connection){
+  if(connection.disabled)return 'На паузе';
+  if(connection.checkingRecent)return 'Проверяем новые сделки';
+  return syncLabels[connection.status]||connection.status;
+}
 type Provider={id:string;enabled:boolean;address?:boolean;passphrase?:boolean;notice:string};
 export async function journalApi<T = {ok:boolean}>(path:string,body?:unknown):Promise<T> {
   const res=await fetch('/api/journal'+path,{method:body===undefined?'GET':'POST',credentials:'same-origin',cache:'no-store',headers:body===undefined?{}:{'Content-Type':'application/json','X-Journal-Request':'1'},...(body===undefined?{}:{body:JSON.stringify(body)})});
@@ -33,10 +39,43 @@ export function DailyNote({date}:{date:string}){
 export function useServerJournal(from:string,to:string,enabled:boolean) {
   const [rows,setRows]=useState<Trade[]>([]),[notice,setNotice]=useState(''),[error,setError]=useState(''),[revision,setRevision]=useState(0);
   useEffect(()=>{if(!enabled){setRows([]);return;}let active=true;setRows([]);
-    async function load(){try{const now=Date.now(),a=new Date(now-7*86400000).toISOString().slice(0,10),b=new Date(now+7*86400000).toISOString().slice(0,10);const [data,recent]=await Promise.all([journalApi<{rows:Trade[];notice:string;unvalued:number;spotIncomplete:number}>(`/journal?from=${from}&to=${to}`),journalApi<{rows:Trade[]}>(`/journal?from=${a}&to=${b}`)]);data.rows=[...new Map([...data.rows,...recent.rows].map(r=>[r.id,r])).values()];if(active){setRows(data.rows);setNotice(data.notice+(data.unvalued?` ${data.unvalued} записей в других валютах не включены в USD-итог.`:'')+(data.spotIncomplete?` ${data.spotIncomplete} продаж Kraken пропущено: в загруженной истории нет полной себестоимости.`:''));setError('');}}catch(e){if(active)setError((e as Error).message);}}
+    async function load(){try{const now=Date.now(),a=new Date(now-7*86400000).toISOString().slice(0,10),b=new Date(now+7*86400000).toISOString().slice(0,10);const [data,recent]=await Promise.all([journalApi<{rows:Trade[];notice:string;unvalued:number;spotIncomplete:number}>(`/journal?from=${from}&to=${to}`),a<from||b>to?journalApi<{rows:Trade[]}>(`/journal?from=${a}&to=${b}`):null]);data.rows=[...new Map([...data.rows,...(recent?.rows||[])].map(r=>[r.id,r])).values()];if(active){setRows(data.rows);setNotice(data.notice+(data.unvalued?` ${data.unvalued} записей в других валютах не включены в USD-итог.`:'')+(data.spotIncomplete?` Spot: по ${data.spotIncomplete} продажам не хватает данных о себестоимости или комиссии.`:''));setError('');}}catch(e){if(active)setError((e as Error).message);}}
     void load();const timer=setInterval(load,10000);return()=>{active=false;clearInterval(timer);};
   },[from,to,enabled,revision]);
   return {rows,notice,error,refresh:()=>setRevision(v=>v+1)};
+}
+
+export function SyncStatus(){
+  const [accounts,setAccounts]=useState<Connection[]>([]),[busy,setBusy]=useState(false),[message,setMessage]=useState('');
+  useEffect(()=>{
+    let active=true;
+    async function load(){
+      try{const data=await journalApi<{connections:Connection[]}>('/connections');if(active)setAccounts(data.connections);}
+      catch{if(active)setAccounts([]);}
+    }
+    void load();const timer=setInterval(load,10000);
+    return()=>{active=false;clearInterval(timer);};
+  },[]);
+  if(!accounts.length)return null;
+  const enabled=accounts.filter(c=>!c.disabled&&c.status!=='unsupported');
+  const incomplete=enabled.filter(c=>c.error||!c.synced||Date.now()-c.synced>8*60*1000).length;
+  return <section className="sync-panel" aria-label="Синхронизация сделок">
+    <div className="sync-panel-heading">
+      <details><summary>Синхронизация сделок {incomplete>0&&<span className="sync-attention">{incomplete} из {enabled.length} сч. с неполными данными</span>}</summary>
+        <div className="sync-accounts">{accounts.map(c=><div key={c.id}><b>{c.exchange} · {c.label}</b><span>{syncLabel(c)}</span>
+          {c.synced&&<small>Проверено {new Date(c.synced).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}</small>}
+          {c.error&&<small className="sync-attention">{c.error}</small>}
+        </div>)}</div>
+      </details>
+      <button className="secondary-button" disabled={busy||!enabled.length} onClick={async()=>{
+        setBusy(true);setMessage('');
+        try{await journalApi('/sync',{});setMessage('Проверка поставлена в очередь');}
+        catch(e){setMessage((e as Error).message);}
+        finally{setBusy(false);}
+      }}>Обновить сделки</button>
+    </div>
+    {message&&<small className="sync-message" role="status">{message}</small>}
+  </section>;
 }
 export function useAllServerJournal(enabled:boolean) {
   const [rows,setRows]=useState<Trade[]>([]),[error,setError]=useState('');
@@ -66,9 +105,14 @@ export function AccountAnalytics({enabled,unit,capitalUsd}:{enabled:boolean;unit
   const [period,setPeriod]=useState<'day'|'week'|'month'|'year'>('month'),[rows,setRows]=useState<Trade[]>([]),[accounts,setAccounts]=useState<Array<CapitalAccount&{availableUsd:string|null}>>([]);
   useEffect(()=>{if(!enabled)return;let active=true;const now=new Date(),from=`${now.getUTCFullYear()}-01-01`,to=`${now.getUTCFullYear()}-12-31`;async function load(){try{const [journal,capital]=await Promise.all([journalApi<{rows:Trade[]}>(`/journal?from=${from}&to=${to}`),journalApi<{accounts?:Array<CapitalAccount&{availableUsd:string|null}>}>('/balances')]);if(active){setRows(journal.rows);setAccounts(capital.accounts||[]);}}catch{}}void load();const timer=setInterval(load,30000);return()=>{active=false;clearInterval(timer);};},[enabled]);
   if(!enabled)return null;const now=new Date(),today=now.toISOString().slice(0,10),week=new Date(now);week.setUTCDate(now.getUTCDate()-((now.getUTCDay()+6)%7));const start=period==='day'?today:period==='week'?week.toISOString().slice(0,10):period==='month'?today.slice(0,7)+'-01':today.slice(0,4)+'-01-01',filtered=rows.filter(v=>v.date>=start&&v.date<=today),net=filtered.reduce((s,v)=>s+v.gross-v.fee+v.funding,0),fees=filtered.reduce((s,v)=>s+v.fee,0),funding=filtered.reduce((s,v)=>s+v.funding,0),wins=filtered.filter(v=>v.gross-v.fee+v.funding>0).length,winrate=filtered.length?wins/filtered.length*100:0,usd=(c:number)=>new Intl.NumberFormat('ru-RU',{style:'currency',currency:'USD'}).format(c/100),display=(c:number)=>unit==='usd'?usd(c):`${c>0?'+':c<0?'−':''}${Math.abs(percentOfCapital(c,capitalUsd)).toFixed(2)}%`;
-  const accountDisplay=(c:number,a:CapitalAccount)=>unit==='usd'?usd(c):`${c>0?'+':c<0?'−':''}${Math.abs(percentOfCapital(c,Number(a.equityUsd||0))).toFixed(2)}%`;
-  const exchangeRows=accounts.map(a=>{const rr=filtered.filter(v=>v.connectionId?v.connectionId===a.connectionId:v.exchange===a.exchange&&v.account===a.label),profit=rr.reduce((s,v)=>s+v.gross-v.fee+v.funding,0),commission=rr.reduce((s,v)=>s+v.fee,0),fund=rr.reduce((s,v)=>s+v.funding,0);return {...a,profit,commission,fund};});
-  return <section className="account-analytics"><div className="analytics-head"><h2>Статистика счетов</h2><div className="period-switch">{([['day','Сегодня'],['week','Неделя'],['month','Месяц'],['year','Год']] as const).map(([id,label])=><button key={id} className={period===id?'active':''} onClick={()=>setPeriod(id)}>{label}</button>)}</div></div><div className="metric-strip"><div><span>Чистый PnL</span><strong className={net>=0?'positive':'negative'}>{display(net)}</strong></div><div><span>Комиссии</span><strong className="negative">{display(-fees)}</strong></div><div><span>Финансирование</span><strong>{display(funding)}</strong></div><div><span>Винрейт</span><strong>{winrate.toFixed(1)}%</strong></div><div><span>Записи PnL</span><strong>{filtered.length}</strong></div></div><div className="accounts-table-wrap"><table className="accounts-table"><thead><tr><th>Биржа / счёт</th><th>Капитал</th><th>Результат</th><th>Комиссия</th><th>Фандинг</th></tr></thead><tbody>{exchangeRows.map(a=><tr key={a.connectionId||a.exchange+a.label}><td><b>{a.exchange}</b><small>{a.label}</small></td><td>{Number(a.equityUsd).toLocaleString('ru-RU',{style:'currency',currency:'USD'})}</td><td className={a.profit>=0?'positive':'negative'}>{accountDisplay(a.profit,a)}</td><td className="negative">{a.commission?accountDisplay(-a.commission,a):'—'}</td><td>{accountDisplay(a.fund,a)}</td></tr>)}</tbody></table>{!accounts.length&&<p className="empty-state">После первой синхронизации здесь появятся капитал и статистика каждого счёта.</p>}</div></section>;
+  const accountDisplay=(c:number,a:CapitalAccount)=>unit==='usd'?usd(c):!Number(a.equityUsd)?'—':`${c>0?'+':c<0?'−':''}${Math.abs(percentOfCapital(c,Number(a.equityUsd||0))).toFixed(2)}%`;
+  const accountsById=new Map(accounts.map(account=>[account.connectionId,account]));
+  for(const row of filtered){
+    if(!row.connectionId||accountsById.has(row.connectionId))continue;
+    accountsById.set(row.connectionId,{connectionId:row.connectionId,exchange:row.exchange,label:row.account,time:0,equityUsd:'',warning:null,availableUsd:null});
+  }
+  const exchangeRows=[...accountsById.values()].map(a=>{const rr=filtered.filter(v=>v.connectionId?v.connectionId===a.connectionId:v.exchange===a.exchange&&v.account===a.label),profit=rr.reduce((s,v)=>s+v.gross-v.fee+v.funding,0),commission=rr.reduce((s,v)=>s+v.fee,0),fund=rr.reduce((s,v)=>s+v.funding,0);return {...a,profit,commission,fund};});
+  return <section className="account-analytics"><div className="analytics-head"><h2>Финрез по счетам</h2><div className="period-switch">{([['day','Сегодня'],['week','Неделя'],['month','Месяц'],['year','Год']] as const).map(([id,label])=><button key={id} className={period===id?'active':''} onClick={()=>setPeriod(id)}>{label}</button>)}</div></div><div className="metric-strip"><div><span>Чистый PnL</span><strong className={net>=0?'positive':'negative'}>{display(net)}</strong></div><div><span>Комиссии</span><strong className="negative">{display(-fees)}</strong></div><div><span>Финансирование</span><strong>{display(funding)}</strong></div><div><span>Плюсовые записи</span><strong>{winrate.toFixed(1)}%</strong></div><div><span>Записи PnL</span><strong>{filtered.length}</strong></div></div><div className="accounts-table-wrap"><table className="accounts-table"><thead><tr><th>Биржа / счёт</th><th>Капитал</th><th>Результат</th><th>Комиссия</th><th>Фандинг</th></tr></thead><tbody>{exchangeRows.map(a=><tr key={a.connectionId||a.exchange+a.label}><td><b>{a.exchange}</b><small>{a.label}</small></td><td>{a.equityUsd?Number(a.equityUsd).toLocaleString('ru-RU',{style:'currency',currency:'USD'}):'—'}</td><td className={a.profit>=0?'positive':'negative'}>{accountDisplay(a.profit,a)}</td><td className="negative">{a.commission?accountDisplay(-a.commission,a):'—'}</td><td>{accountDisplay(a.fund,a)}</td></tr>)}</tbody></table>{!exchangeRows.length&&<p className="empty-state">После первой синхронизации здесь появятся капитал и статистика каждого счёта.</p>}</div></section>;
 }
 export function OwnerAccess({onOpen}:{onOpen:()=>void}) {
   const [state,setState]=useState<'loading'|'setup'|'login'|'error'>('loading'),[error,setError]=useState(''),[busy,setBusy]=useState(false);
@@ -80,7 +124,7 @@ export function Connections({onChange}:{onChange:()=>void}) {
   const selected=providers.find(v=>v.id===exchange);
   async function load(){const data=await journalApi<{connections:Connection[];catalog:Provider[]}>('/connections');setItems(data.connections);setProviders(data.catalog);}
   useEffect(()=>{void load().catch(e=>setError(e.message));const timer=setInterval(()=>void load().catch(()=>{}),4000);return()=>clearInterval(timer);},[]);
-  const labels:Record<string,string>={queued:'В очереди',syncing:'Загружаем историю',retrying:'Ожидаем биржу',ready:'Доступная история загружена',error:'Нужна проверка'};
+  const labels=syncLabels;
   async function action(c:Connection,verb:string){setError('');try{await journalApi(`/connections/${c.id}/${verb}`,{});await load();onChange();}catch(e){setError((e as Error).message);}}
   return <div className="server-connections"><div className="saved-connections">{items.map(c=><section className="saved-connection" key={c.id}><strong>{c.exchange} · {c.label}</strong><span>{c.disabled?'Приостановлено':c.status==='syncing'&&c.synced?'История загружается · новые сделки обновляются отдельно':labels[c.status]||c.status}</span><small>{c.records.toLocaleString('ru-RU')} записей{c.earliest?` · с ${new Date(c.earliest).toLocaleDateString('ru-RU')}`:''}</small>{c.synced&&<small>Новые сделки проверены: {new Date(c.synced).toLocaleString('ru-RU')}</small>}{c.error&&<p role="alert">{c.error}</p>}<div className="connection-actions"><button className="secondary-button" onClick={()=>void action(c,'sync')}>Синхронизировать</button><button className="secondary-button" onClick={()=>void action(c,c.disabled?'resume':'pause')}>{c.disabled?'Продолжить':'Пауза'}</button><button className="secondary-button danger-button" onClick={()=>{if(window.confirm('Удалить подключение и всю загруженную историю этого счёта?'))void action(c,'delete')}}>Удалить</button></div></section>)}</div>
     <form className="connection-form" onSubmit={async e=>{e.preventDefault();setBusy(true);setError('');const form=e.currentTarget;const data=new FormData(form);try{await journalApi('/connections',{exchange,label:data.get('label'),apiKey:data.get('apiKey'),secret:data.get('secret'),passphrase:data.get('passphrase'),address:data.get('address'),start:data.get('start'),spotSymbols:data.get('spotSymbols'),futures:exchange==='MEXC'||data.get('futures')==='on'});form.reset();await load();onChange();}catch(e){setError((e as Error).message);}finally{setBusy(false);}}}>
@@ -101,7 +145,7 @@ export function RealHistory({from,to,exchange,market}:{from:string;to:string;exc
   useEffect(()=>setOffset(0),[from,to]);
   useEffect(()=>{let active=true;async function load(){try{const data=await journalApi<{rows:typeof rows;hasMore:boolean}>(`/fills?from=${from}&to=${to}&offset=${offset}`);if(active){setRows(data.rows);setMore(data.hasMore);setError('');}}catch(e){if(active)setError((e as Error).message);}}void load();const timer=setInterval(load,10000);return()=>{active=false;clearInterval(timer);};},[from,to,offset]);
   const filtered=rows.filter(v=>(exchange==='all'||exchange===v.exchange)&&(market==='all'||market===v.market));
-  return <div><p className="info-note">Исполнения биржи. Цена и комиссия — в исходных валютах. Spot PnL попадает в итог для Hyperliquid и для полностью восстановленных FIFO-сделок Kraken; остальные spot-исполнения показаны без расчёта прибыли. Фильтры применяются к текущей странице.</p>{error&&<p role="alert">{error}</p>}<table className="real-history"><thead><tr>{['Дата · UTC','Биржа','Тикер','Сторона','Количество','Цена','Комиссия'].map(v=><th key={v}>{v}</th>)}</tr></thead><tbody>{filtered.map((v,i)=><tr key={v.exchange+v.id+i}><td>{new Date(v.time).toISOString().replace('T',' ').slice(0,19)}</td><td>{v.exchange}</td><td>{v.symbol}</td><td>{v.side}</td><td>{v.quantity}</td><td>{v.price}</td><td>{v.fee} {v.currency}</td></tr>)}</tbody></table>{!filtered.length&&<p className="empty-state">Нет исполнений на этой странице</p>}<div className="connection-actions"><button className="secondary-button" disabled={!offset} onClick={()=>setOffset(v=>Math.max(0,v-200))}>Назад</button><button className="secondary-button" disabled={!more} onClick={()=>setOffset(v=>v+200)}>Далее</button></div></div>;
+  return <div><p className="info-note">Исполнения биржи. Цена и комиссия — в исходных валютах. Spot PnL рассчитывается по известной себестоимости или берётся из отчёта биржи.</p>{error&&<p role="alert">{error}</p>}<table className="real-history"><thead><tr>{['Дата · UTC','Биржа','Тикер','Сторона','Количество','Цена','Комиссия'].map(v=><th key={v}>{v}</th>)}</tr></thead><tbody>{filtered.map((v,i)=><tr key={v.exchange+v.id+i}><td>{new Date(v.time).toISOString().replace('T',' ').slice(0,19)}</td><td>{v.exchange}</td><td>{v.symbol}</td><td>{v.side}</td><td>{v.quantity}</td><td>{v.price}</td><td>{v.fee} {v.currency}</td></tr>)}</tbody></table>{!filtered.length&&<p className="empty-state">Нет исполнений на этой странице</p>}<div className="connection-actions"><button className="secondary-button" disabled={!offset} onClick={()=>setOffset(v=>Math.max(0,v-200))}>Назад</button><button className="secondary-button" disabled={!more} onClick={()=>setOffset(v=>v+200)}>Далее</button></div></div>;
 }
 
 

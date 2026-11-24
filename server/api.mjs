@@ -3,10 +3,12 @@ import { encrypt,digest,passwordHash,passwordMatches,cents,units,decimal } from 
 import { enqueue } from './database.mjs';
 import { catalog,createAdapter,normalizedCapital } from './exchanges.mjs';
 import { buildTrades,marketCandles,normalizeExecution,tickerOf } from './trade-details.mjs';
-import { krakenSpotPnl } from './spot-pnl.mjs';
+import { chartIntervals } from './market-history.mjs';
+import { spotPnl } from './spot-pnl.mjs';
 
 class ApiError extends Error { constructor(status,message){super(message);this.status=status;} }
 export function createApi(db,key,{origin,secure,setupToken,adapterFactory=createAdapter}) {
+  const charts=new Map();
   const cookieName=secure?'__Host-journal':'journal';
   const cookie=(token,age)=>`${cookieName}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${age}${secure?'; Secure':''}`;
   const sessionFor=req=>{
@@ -134,7 +136,17 @@ export function createApi(db,key,{origin,secure,setupToken,adapterFactory=create
           (SELECT min(time) FROM events e WHERE e.connection_id=c.id) AS earliest,
           (SELECT checkpoint FROM jobs j WHERE j.connection_id=c.id ORDER BY id DESC LIMIT 1) AS checkpoint
           FROM connections c ORDER BY c.created`).all();
-        return send(res,200,{catalog,connections});
+        return send(res,200,{catalog,connections:connections.map(({checkpoint,...c})=>{
+          const state=JSON.parse(checkpoint||'{}');
+          return {...c,checkingRecent:!!state.live&&c.status==='syncing'};
+        })});
+      }
+      if(method==='POST'&&path==='/sync') {
+        for(const {id} of db.prepare("SELECT id FROM connections WHERE disabled=0 AND status<>'unsupported'").all()) {
+          enqueue(db,id);
+          db.prepare("UPDATE jobs SET next_run=0,checkpoint=json_set(checkpoint,'$.liveAttemptAt',1) WHERE connection_id=? AND status='queued'").run(id);
+        }
+        return send(res,202,{ok:true});
       }
       if(method==='POST'&&path==='/connections') {
         const input=await body(req),exchange=text(input.exchange);
@@ -163,6 +175,7 @@ export function createApi(db,key,{origin,secure,setupToken,adapterFactory=create
           const failed=db.prepare("SELECT id FROM jobs WHERE connection_id=? AND status='failed' ORDER BY id DESC LIMIT 1").get(id);
           const active=db.prepare("SELECT id FROM jobs WHERE connection_id=? AND status IN ('queued','running')").get(id);
           if(failed&&!active)db.prepare("UPDATE jobs SET status='queued',attempts=0,next_run=0,error=NULL WHERE id=?").run(failed.id);else enqueue(db,id);
+          if(verb==='sync')db.prepare("UPDATE jobs SET next_run=0,checkpoint=json_set(checkpoint,'$.liveAttemptAt',1) WHERE connection_id=? AND status='queued'").run(id);
         }
         return send(res,200,{ok:true});
       }
@@ -170,33 +183,63 @@ export function createApi(db,key,{origin,secure,setupToken,adapterFactory=create
         const allTime=url.searchParams.get('scope')==='all',from=allTime?0:Date.parse(url.searchParams.get('from')),to=allTime?Date.now():Date.parse(url.searchParams.get('to'));
         if(!Number.isFinite(from)||!Number.isFinite(to)||to<from||(!allTime&&to-from>370*86400000))throw new ApiError(400,'Период не должен превышать год.');
         const direct=db.prepare(`SELECT e.*,c.exchange,c.label FROM events e JOIN connections c ON c.id=e.connection_id WHERE time>=? AND time<? AND kind='pnl' ORDER BY time`).all(from,to+86400000);
-        const krakenFills=db.prepare(`SELECT e.*,c.exchange,c.label FROM events e JOIN connections c ON c.id=e.connection_id WHERE c.exchange='Kraken' AND e.kind='fill' AND e.market='spot' AND e.time<? ORDER BY e.time,e.external_id`).all(to+86400000);
-        const spot=krakenSpotPnl(krakenFills,{from}),events=[...direct,...spot.events].sort((a,b)=>a.time-b.time);
+        const fills=db.prepare(`SELECT e.*,c.exchange,c.label FROM events e JOIN connections c ON c.id=e.connection_id
+          WHERE c.exchange<>'Hyperliquid' AND e.kind='fill' AND e.market='spot' AND e.time<? ORDER BY e.time,e.external_id`).all(to+86400000);
+        const spot=spotPnl(fills,{from}),events=[...direct,...spot.events].sort((a,b)=>a.time-b.time);
         const groups=new Map();let unvalued=spot.otherQuotes;
         for(const e of events) {
           if(!['USD','USDT','USDC'].includes(e.currency)){unvalued++;continue;}
-          const day=new Date(e.time).toISOString().slice(0,10),id=[e.connection_id,day,e.symbol,e.currency].join(':');
+          const day=new Date(e.time).toISOString().slice(0,10),id=[e.connection_id,day,e.market,e.symbol,e.currency].join(':');
           const row=groups.get(id)||{id,connectionId:e.connection_id,date:day,exchange:e.exchange,account:e.label,ticker:tickerOf(e.symbol)||'Без тикера',market:e.market,settle:e.currency,gross:0n,fee:0n,funding:0n};
           row.gross+=units(e.gross);row.fee+=units(e.fee);row.funding+=units(e.funding);groups.set(id,row);
         }
         const rows=[...groups.values()].map(r=>({...r,gross:cents(decimal(r.gross)),fee:cents(decimal(r.fee)),funding:cents(decimal(r.funding))}));
-        return send(res,200,{rows,unvalued,spotIncomplete:spot.incomplete,notice:'Реализованный PnL фьючерсов и Hyperliquid Spot берётся из данных биржи. Kraken Spot рассчитывается FIFO только для сделок с полностью известной себестоимостью. USD/USDT/USDC приняты за 1 USD. Процент PnL считается от текущего общего капитала всех подключённых счетов.'});
+        return send(res,200,{rows,unvalued,spotIncomplete:spot.incomplete,notice:'Дни группируются по UTC. PnL фьючерсов и Hyperliquid Spot берётся из данных биржи. Для остальных spot-сделок используется FIFO при известной себестоимости. Процент календаря рассчитан от текущего общего капитала.'});
       }
       if(method==='GET'&&path==='/trade-details') {
-        const date=url.searchParams.get('date'),ticker=String(url.searchParams.get('ticker')||'').toUpperCase(),exchange=url.searchParams.get('exchange')||'all';
-        const day=Date.parse(date);if(!/^\d{4}-\d{2}-\d{2}$/.test(date||'')||!Number.isFinite(day)||!ticker||ticker.length>30)throw new ApiError(400,'Некорректный день или тикер.');
+        const date=url.searchParams.get('date'),ticker=String(url.searchParams.get('ticker')||'').toUpperCase(),exchange=url.searchParams.get('exchange')||'all',market=url.searchParams.get('market')||'all';
+        const day=Date.parse(date);if(!/^\d{4}-\d{2}-\d{2}$/.test(date||'')||!Number.isFinite(day)||ticker.length>30)throw new ApiError(400,'Некорректный день или тикер.');
+        const matches=v=>(!ticker||tickerOf(v.symbol)===ticker)&&(exchange==='all'||v.exchange===exchange)&&(market==='all'||v.market===market);
         const rows=db.prepare(`SELECT e.*,c.exchange,c.label FROM events e JOIN connections c ON c.id=e.connection_id WHERE e.time>=? AND e.time<? AND e.kind IN ('fill','pnl') ORDER BY e.time`).all(day-7*86400000,day+86400000);
-        const relevant=rows.filter(v=>tickerOf(v.symbol)===ticker&&(exchange==='all'||v.exchange===exchange));
-        const executions=relevant.map(normalizeExecution).filter(Boolean),built=buildTrades(executions).filter(v=>{const time=v.exitTime||v.entryTime;return time>=day&&time<day+86400000;});
-        const pnlRows=relevant.filter(v=>v.kind==='pnl'&&v.time>=day&&v.time<day+86400000).map(v=>({id:`pnl:${v.connection_id}:${v.external_id}`,exchange:v.exchange,account:v.label,symbol:v.symbol,market:v.market,direction:'unknown',entryTime:v.time,exitTime:v.time,entryPrice:0,exitPrice:0,pnl:Number(v.gross)+Number(v.funding),fee:Number(v.fee),complete:false,executions:[]}));
-        const trades=built.length?built:pnlRows;
-        return send(res,200,{ticker,date,trades,executionCount:executions.length,limited:!built.length&&pnlRows.length>0});
+        const relevant=rows.filter(matches);
+        const executions=relevant.filter(v=>(v.market==='futures'||v.exchange==='Hyperliquid')&&
+          (v.kind==='fill'||['MEXC','Hyperliquid'].includes(v.exchange))).map(normalizeExecution).filter(Boolean);
+        const built=buildTrades(executions).filter(v=>v.complete&&v.exitTime>=day&&v.exitTime<day+86400000);
+        const covered=new Set(built.flatMap(v=>v.exits.map(e=>`${v.connectionId}:${v.market}:${v.symbol}:${e.time}`)));
+        const spotRows=db.prepare(`SELECT e.*,c.exchange,c.label FROM events e JOIN connections c ON c.id=e.connection_id
+          WHERE e.kind='fill' AND e.market='spot' AND c.exchange<>'Hyperliquid' AND e.time<? AND e.symbol LIKE ? ORDER BY e.time,e.external_id`).all(day+86400000,`${ticker}%`)
+          .filter(matches);
+        const spot=spotPnl(spotRows,{from:day,details:true}).events;
+        const pnlRows=relevant.filter(v=>v.kind==='pnl'&&v.time>=day&&v.time<day+86400000&&Number(v.gross)!==0&&
+          !covered.has(`${v.connection_id}:${v.market}:${v.symbol}:${v.time}`));
+        const trades=[...built,...[...pnlRows,...spot].map(v=>({id:`pnl:${v.connection_id}:${v.external_id}`,exchange:v.exchange,
+          account:v.label,symbol:v.symbol,market:v.market,direction:v.details?'long':'unknown',entryTime:v.details?.entryTime||v.time,
+          exitTime:v.time,entryPrice:v.details?.entryPrice||0,exitPrice:v.details?.exitPrice||0,pnl:Number(v.gross)+Number(v.funding),
+          fee:Number(v.fee),complete:!!v.details,entries:v.details?.entries,exits:v.details?.exits,executions:v.details?.executions||[]}))]
+          .sort((a,b)=>b.exitTime-a.exitTime);
+        return send(res,200,{ticker,date,trades,executionCount:executions.length,limited:pnlRows.length>0});
       }
       if(method==='GET'&&path==='/market-chart') {
         const exchange=url.searchParams.get('exchange'),symbol=url.searchParams.get('symbol'),market=url.searchParams.get('market')==='spot'?'spot':'futures',from=Number(url.searchParams.get('from')),to=Number(url.searchParams.get('to')),intervalMs=Number(url.searchParams.get('interval'));
-        const maxRange=intervalMs===86400000?180*86400000:intervalMs===3600000?14*86400000:intervalMs>=60000?2*86400000:3600000;
-        if(!catalog.some(v=>v.id===exchange)||!/^[A-Z0-9_\-/]{3,40}$/i.test(symbol||'')||!Number.isFinite(from)||!Number.isFinite(to)||to<=from||to-from>maxRange||![1000,5000,15000,60000,300000,3600000,86400000].includes(intervalMs))throw new ApiError(400,'Некорректные параметры графика.');
-        const candles=await marketCandles({exchange,symbol,market,from,to,intervalMs});return send(res,200,{candles,source:candles.length?'exchange':'unavailable'});
+        const maxRange=intervalMs===86400000?180*86400000:intervalMs>=3600000?14*86400000:intervalMs>=60000?2*86400000:3600000;
+        if(!catalog.some(v=>v.id===exchange)||!/^[A-Z0-9_:\-/@.]{1,40}$/i.test(symbol||'')||!Number.isFinite(from)||!Number.isFinite(to)||to<=from||to-from>maxRange||!chartIntervals.has(intervalMs))throw new ApiError(400,'Некорректные параметры графика.');
+        const coin=url.searchParams.get('coin')||undefined;
+        if(coin&&!/^@\d{1,8}$|^[a-z0-9:_/.-]{1,40}$/i.test(coin))throw new ApiError(400,'Некорректный инструмент графика.');
+        const key=JSON.stringify([exchange,symbol,coin,market,from,to,intervalMs]);
+        let cached=charts.get(key);
+        if(!cached||cached.expires<Date.now()) {
+          cached={expires:Date.now()+15000,promise:marketCandles({exchange,symbol,coin,market,from,to,intervalMs})};
+          charts.set(key,cached);
+          while(charts.size>100)charts.delete(charts.keys().next().value);
+        }
+        try {
+          const candles=await cached.promise;
+          if(candles.length)cached.expires=Date.now()+120000;
+          return send(res,200,{candles,source:candles.length?'exchange':'unavailable'});
+        } catch {
+          charts.delete(key);
+          throw new ApiError(502,'Биржа временно не отдала свечи за этот период.');
+        }
       }
       if(method==='GET'&&path==='/fills') {
         const from=Date.parse(url.searchParams.get('from')),to=Date.parse(url.searchParams.get('to'));

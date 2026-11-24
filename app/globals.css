@@ -1,6 +1,25 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "../vendor/shadcn-tailwind-4.13.0.css";
+.sync-panel{margin:0 0 16px;padding:12px 14px;border:1px solid var(--border);border-radius:var(--radius);background:var(--card)}
+.sync-panel-heading{display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap}
+.sync-panel-heading details{flex:1;min-width:min(100%,230px)}
+.sync-panel summary{cursor:pointer;font-size:14px;font-weight:600}
+.sync-attention{color:#e3bd78;font-weight:400}
+.sync-panel summary span{margin-left:8px;font-size:13px}
+.sync-accounts{display:grid;gap:8px;margin-top:12px;grid-template-columns:repeat(auto-fit,minmax(min(100%,210px),1fr))}
+.sync-accounts div{display:grid;gap:4px;align-content:start;padding:9px;border:1px solid var(--border);border-radius:6px;overflow-wrap:anywhere}
+.sync-accounts b,.sync-accounts span{font-size:13px}
+.sync-accounts small,.sync-message{font-size:12px;color:var(--muted-foreground)}
+.sync-accounts small.sync-attention{color:#e3bd78}
+.chart-intervals button:disabled{opacity:.4;cursor:default}
+.trade-order-list{max-height:220px;overflow:auto;border:1px solid var(--border);border-radius:8px}
+.trade-order-list table{width:100%;border-collapse:collapse;white-space:nowrap;font-variant-numeric:tabular-nums}
+.trade-order-list th,.trade-order-list td{text-align:right;padding:9px 12px;border-bottom:1px solid var(--border);font-size:13px}
+.trade-order-list th:first-child,.trade-order-list td:first-child{text-align:left}
+.trade-order-list tr:last-child td{border-bottom:0}
+.trade-order-list caption{text-align:left;padding:10px 12px;font-size:14px;font-weight:600}
+.day-trades-button{width:fit-content;margin:0 0 12px}
 /* Server-backed personal workspace */
 .owner-access{min-height:100dvh;display:grid;place-items:center;padding:24px}.owner-access>.panel{width:min(100%,480px);padding:28px}.owner-access p{margin:18px 0;color:#a9b1bb;line-height:1.6}.connection-dialog{max-width:680px!important;max-height:90dvh;overflow:auto}.connection-form{display:grid;gap:16px}.connection-form label{display:grid;gap:7px;font-size:14px}.connection-form input:not([type=checkbox]),.connection-form select{width:100%;min-height:42px;padding:10px 12px;background:#11161b;border:1px solid #434b54;border-radius:7px;color:#edf0f3;font-size:16px}.connection-form small,.saved-connection small{color:#9aa5b0;line-height:1.5}.connection-form .check-label{display:flex;align-items:flex-start;gap:9px;line-height:1.5}.check-label input{margin-top:4px}.connection-form button:disabled{opacity:.5}.saved-connections{display:grid;gap:12px;margin-bottom:24px}.saved-connection{display:grid;gap:8px;padding:16px;border:1px solid #414a51;border-radius:9px}.saved-connection>span{font-size:14px;color:#bddc9d}.connection-actions{display:flex;gap:10px;flex-wrap:wrap}.server-error{color:#ffb1b5!important;overflow-wrap:anywhere}.real-history{width:100%;white-space:nowrap}.top-actions{margin-left:auto}
 :root{--background:#101216;--foreground:#eceef1;--card:#171a1f;--card-foreground:#eceef1;--popover:#202329;--popover-foreground:#eceef1;--primary:#bddc9d;--primary-foreground:#161d10;--secondary:#22262c;--secondary-foreground:#eceef1;--muted:#20242a;--muted-foreground:#969ca6;--accent:#292e35;--accent-foreground:#fff;--destructive:#eb8c95;--border:#2b2f36;--input:#343840;--ring:#bddc9d;--radius:.75rem}

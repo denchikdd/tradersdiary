@@ -1,5 +1,5 @@
 import { createHash, createHmac } from 'node:crypto';
-import { decimal, units } from './security.mjs';
+import { decimal, multiply, units } from './security.mjs';
 import { createExtraAdapter } from './exchanges-extra.mjs';
 
 export const DAY = 86400000;
@@ -19,7 +19,6 @@ export const catalog = [
 const hmac = (secret, text, encoding='hex') => createHmac('sha256',secret).update(text).digest(encoding);
 export class ExchangeError extends Error { constructor(message, retryable=false) { super(message); this.name='ExchangeError';this.retryable=retryable; } }
 const delay = ms => new Promise(resolve=>setTimeout(resolve, ms));
-const multiply = (a,b) => decimal(units(a)*units(b)/(10n**12n));
 // No arbitrary URLs, redirects or trading endpoints are accepted by these adapters.
 export function createAdapter(exchange, credentials, options={}, fetchImpl=fetch) {
   if(['Gate.io','Bitget','Aster','KuCoin','MEXC','Lighter'].includes(exchange))return createExtraAdapter(exchange,credentials,options,fetchImpl);

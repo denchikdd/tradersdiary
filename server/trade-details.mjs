@@ -1,45 +1,54 @@
 import { inflateRawSync } from 'node:zlib';
+import { candle, normalizeCandles, venueCandles } from './market-history.mjs';
 
 const QUOTES=['USDT','USDC','USD'];
 const archiveCache=new Map();
 
 export function tickerOf(symbol=''){
-  const clean=String(symbol).toUpperCase().replace(/[-_/]?SWAP$/,'').replace(/[^A-Z0-9]/g,'');
+  const clean=String(symbol).toUpperCase().replace(/[-_/]?SWAP$/,'').replace(/(USDT|USDC)M$/,'$1').replace(/[^A-Z0-9]/g,'');
   return clean.replace(new RegExp(`(${QUOTES.join('|')})$`),'')||clean||'UNKNOWN';
 }
 
-const number=(...values)=>{for(const value of values){const n=Number(value);if(Number.isFinite(n))return n;}return 0;};
+const number=(...values)=>{for(const value of values){if(value==null||value==='')continue;const n=Number(value);if(Number.isFinite(n))return n;}return 0;};
 const word=value=>String(value||'').toUpperCase();
 
 export function normalizeExecution(row){
   let raw={};try{raw=typeof row.raw==='string'?JSON.parse(row.raw):row.raw||{};}catch{}
-  let side=word(raw.side||raw.S||raw.tradeSide);
-  if(['1','2'].includes(side))side='BUY';if(['3','4'].includes(side))side='SELL';
+  let side=word(raw.side||raw.S||raw.type||raw.tradeSide);
+  if(row.exchange==='MEXC'&&row.market==='futures')side=({1:'BUY',2:'BUY',3:'SELL',4:'SELL'})[side]||side;
   if(!side&&raw.isBuyer!==undefined)side=raw.isBuyer?'BUY':'SELL';
   if(side==='B')side='BUY';if(['A','S'].includes(side))side='SELL';
-  const dir=word(raw.dir||raw.direction),positionSide=word(raw.positionSide||raw.posSide||raw.holdSide);
+  const dir=word(raw.dir||raw.direction),positionSide=word(raw.positionSide||raw.posSide||raw.holdSide||raw.posModeSide);
   if(!side&&dir.includes('LONG'))side=dir.includes('CLOSE')?'SELL':'BUY';
   if(!side&&dir.includes('SHORT'))side=dir.includes('CLOSE')?'BUY':'SELL';
   const price=number(raw.execPrice,raw.price,raw.fillPx,raw.px,raw.dealPrice,raw.deal_price,raw.avgPrice);
-  const quantity=Math.abs(number(raw.execQty,raw.qty,raw.fillSz,raw.sz,raw.vol,raw.quantity,raw.dealVol,raw.size));
+  const quantity=Math.abs(number(raw.execQty,raw.qty,raw.fillSz,raw.sz,raw.vol,raw.quantity,raw.dealVol,raw.size,raw.amount,raw.baseVolume));
   if(!price||!quantity||!['BUY','SELL'].includes(side))return null;
-  return {id:String(row.external_id||raw.execId||raw.tradeId||raw.id),time:Number(row.time),exchange:row.exchange,account:row.label,symbol:row.symbol,market:row.market,side,positionSide,price,quantity,pnl:number(raw.realizedPnl,raw.execPnl,raw.closedPnl,raw.profit,row.gross),fee:Math.abs(number(raw.execFee,raw.commission,raw.fee,row.fee)),raw};
+  return {id:String(row.external_id||raw.execId||raw.tradeId||raw.id),connectionId:row.connection_id,time:Number(row.time),exchange:row.exchange,account:row.label,symbol:row.symbol,chartSymbol:row.exchange==='Hyperliquid'?raw.coin:undefined,market:row.market,side,positionSide,price,quantity,pnl:number(raw.realizedPnl,raw.execPnl,raw.closedPnl,raw.profit,row.gross),fee:Math.abs(number(raw.execFee,raw.commission,raw.fee,row.fee)),raw};
 }
 
 export function buildTrades(executions){
   const groups=new Map();
-  for(const e of executions){const key=[e.exchange,e.account,e.symbol,e.positionSide||'ONEWAY'].join('|');const list=groups.get(key)||[];list.push(e);groups.set(key,list);}
+  for(const e of executions){
+    const key=[e.connectionId||e.account,e.exchange,e.market,e.symbol,e.positionSide||'ONEWAY'].join('|');
+    if(!groups.has(key))groups.set(key,new Map());
+    groups.get(key).set(e.id,e);
+  }
   const result=[];
-  for(const list of groups.values()){
+  for(const group of groups.values()){
+    const list=[...group.values()];
     list.sort((a,b)=>a.time-b.time||a.id.localeCompare(b.id));let position=0,current=null,index=0;
     for(const e of list){
       const signed=e.side==='BUY'?e.quantity:-e.quantity;
-      if(!current||Math.abs(position)<1e-12){position=signed;current={id:`${e.exchange}:${e.symbol}:${e.time}:${index++}`,exchange:e.exchange,account:e.account,symbol:e.symbol,market:e.market,direction:signed>0?'long':'short',entryTime:e.time,exitTime:null,entries:[e],exits:[],pnl:e.pnl,fee:e.fee,complete:false};continue;}
+      if(!current||Math.abs(position)<1e-12){position=signed;current={id:`${e.exchange}:${e.symbol}:${e.time}:${index++}`,connectionId:e.connectionId,exchange:e.exchange,account:e.account,symbol:e.symbol,chartSymbol:e.chartSymbol,market:e.market,direction:signed>0?'long':'short',entryTime:e.time,exitTime:null,entries:[e],exits:[],pnl:e.pnl,fee:e.fee,complete:false};continue;}
       if(Math.sign(position)===Math.sign(signed)){position+=signed;current.entries.push(e);current.pnl+=e.pnl;current.fee+=e.fee;continue;}
-      current.exits.push(e);current.pnl+=e.pnl;current.fee+=e.fee;const before=position;position+=signed;
+      const before=position;
+      const closingQuantity=Math.min(Math.abs(before),e.quantity);
+      const closingFee=e.fee*closingQuantity/e.quantity;
+      current.exits.push({...e,quantity:closingQuantity,fee:closingFee});current.pnl+=e.pnl;current.fee+=closingFee;position+=signed;
       if(Math.abs(position)<1e-12||Math.sign(position)!==Math.sign(before)){
         current.exitTime=e.time;current.complete=true;result.push(current);
-        if(Math.abs(position)>=1e-12){current={id:`${e.exchange}:${e.symbol}:${e.time}:${index++}`,exchange:e.exchange,account:e.account,symbol:e.symbol,market:e.market,direction:position>0?'long':'short',entryTime:e.time,exitTime:null,entries:[e],exits:[],pnl:0,fee:0,complete:false};}else current=null;
+        if(Math.abs(position)>=1e-12){current={id:`${e.exchange}:${e.symbol}:${e.time}:${index++}`,connectionId:e.connectionId,exchange:e.exchange,account:e.account,symbol:e.symbol,chartSymbol:e.chartSymbol,market:e.market,direction:position>0?'long':'short',entryTime:e.time,exitTime:null,entries:[{...e,quantity:Math.abs(position),fee:e.fee-closingFee,pnl:0}],exits:[],pnl:0,fee:e.fee-closingFee,complete:false};}else current=null;
       }
     }
     if(current)result.push(current);
@@ -71,21 +80,50 @@ async function binanceArchiveRows(symbol,from,to,fetchImpl){
   return rows;
 }
 
-export async function marketCandles({exchange,symbol,market,from,to,intervalMs,fetchImpl=fetch}){
+async function binanceArchiveCandles(symbol,market,from,to,intervalMs,fetchImpl,signal) {
+  const interval={1000:'1s',60000:'1m',300000:'5m',900000:'15m',3600000:'1h',14400000:'4h',86400000:'1d'}[intervalMs];
+  const prefix=market==='spot'?'spot':'futures/um';
+  const ranges=[];
+  const day=86400000;
+  for(let time=Math.floor(to/day)*day;time>=Math.floor(from/day)*day&&ranges.length<5;time-=day) {
+    const date=new Date(time).toISOString().slice(0,10);
+    if(time<Math.floor(Date.now()/day)*day)ranges.push(date);
+  }
+  const pages=await Promise.allSettled(ranges.map(async date=>{
+    const url=`https://data.binance.vision/data/${prefix}/daily/klines/${symbol}/${interval}/${symbol}-${interval}-${date}.zip`;
+    const response=await fetchImpl(url,{redirect:'error',signal});
+    if(!response.ok)return [];
+    const zip=Buffer.from(await response.arrayBuffer());
+    if(zip.length>5*1024*1024)return [];
+    return unzipFirst(zip).toString('utf8').split('\n').filter(line=>/^\d/.test(line)).map(line=>{
+      const [t,o,h,l,c,v]=line.split(',');
+      return candle(Number(t)>1e14?Number(t)/1000:t,o,h,l,c,v);
+    });
+  }));
+  return pages.flatMap(page=>page.status==='fulfilled'?page.value:[]);
+}
+
+export async function marketCandles({exchange,symbol,coin,market,from,to,intervalMs,fetchImpl=fetch}){
   const safeSymbol=String(symbol).toUpperCase().replace(/[^A-Z0-9]/g,'');if(!safeSymbol)throw new Error('Некорректный тикер.');
-  if(intervalMs>=60000){
-    const intervals={60000:'1m',300000:'5m',3600000:'1h',86400000:'1d'},interval=intervals[intervalMs],endpoints={Aster:market==='spot'?'https://sapi.asterdex.com/api/v3/klines':'https://fapi.asterdex.com/fapi/v3/klines',Binance:market==='spot'?'https://api.binance.com/api/v3/klines':'https://fapi.binance.com/fapi/v1/klines',MEXC:'https://api.mexc.com/api/v3/klines'},endpoint=endpoints[exchange];if(!endpoint||!interval)return [];
-    const url=new URL(endpoint);url.searchParams.set('symbol',safeSymbol);url.searchParams.set('interval',interval);url.searchParams.set('startTime',String(from));url.searchParams.set('endTime',String(to));url.searchParams.set('limit','1000');const response=await fetchImpl(url,{headers:{Accept:'application/json'},redirect:'error',signal:AbortSignal.timeout(15000)});if(!response.ok)return [];
-    const body=await response.json(),rows=Array.isArray(body)?body:body?.data||[];return rows.map(v=>({time:Number(v[0]),open:Number(v[1]),high:Number(v[2]),low:Number(v[3]),close:Number(v[4]),volume:Number(v[5])})).filter(v=>Number.isFinite(v.time)&&Number.isFinite(v.close));
+  const fromBucket=Math.floor(from/intervalMs)*intervalMs;
+  const signal=AbortSignal.timeout(14000);
+  if(intervalMs>=60000||(exchange==='Binance'&&market==='spot'&&intervalMs===1000)){
+    let rows=[];
+    try {rows=await venueCandles({exchange,symbol:String(symbol).toUpperCase(),coin,market,from:fromBucket,to,intervalMs,fetchImpl,signal});} catch(e) {
+      if(exchange!=='Binance')throw e;
+    }
+    if(!rows.length&&exchange==='Binance'&&!signal.aborted)rows=await binanceArchiveCandles(safeSymbol,market,fromBucket,to,intervalMs,fetchImpl,signal);
+    return normalizeCandles(rows,fromBucket,to);
   }
   const hosts={Aster:market==='spot'?'https://sapi.asterdex.com/api/v3/aggTrades':'https://fapi.asterdex.com/fapi/v3/aggTrades',Binance:market==='spot'?'https://api.binance.com/api/v3/aggTrades':'https://fapi.binance.com/fapi/v1/aggTrades',MEXC:'https://api.mexc.com/api/v3/aggTrades'};
   const endpoint=hosts[exchange];if(!endpoint)return [];
   const rows=[];let cursor=from;const maxPages=intervalMs===1000?64:16;
   for(let page=0;page<maxPages&&cursor<=to;page++){
     const url=new URL(endpoint);url.searchParams.set('symbol',safeSymbol);url.searchParams.set('startTime',String(cursor));url.searchParams.set('endTime',String(to));url.searchParams.set('limit','1000');
-    const response=await fetchImpl(url,{headers:{Accept:'application/json'},redirect:'error',signal:AbortSignal.timeout(15000)});if(!response.ok){if(exchange==='Binance'&&market!=='spot')return aggregateTrades(await binanceArchiveRows(safeSymbol,from,to,fetchImpl),intervalMs);return [];}
+    if(signal.aborted)break;
+    const response=await fetchImpl(url,{headers:{Accept:'application/json'},redirect:'error',signal});if(!response.ok){if(exchange==='Binance'&&market!=='spot')return aggregateTrades(await binanceArchiveRows(safeSymbol,from,to,fetchImpl),intervalMs);return [];}
     const body=await response.json(),batch=Array.isArray(body)?body:body?.data||[];rows.push(...batch);if(batch.length<1000)break;
     const lastTime=number(batch.at(-1)?.T,batch.at(-1)?.time,batch.at(-1)?.ts);if(!lastTime||lastTime<cursor)break;cursor=lastTime+1;
   }
-  return aggregateTrades(rows,intervalMs);
+  return aggregateTrades(rows.filter(row=>{const t=number(row.T,row.time,row.ts);return t>=from&&t<=to;}),intervalMs);
 }
